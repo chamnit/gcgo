@@ -48,10 +48,23 @@ class GRBLStreamer:
     # --- single command (blocking) ---
 
     def send_command(self, cmd: str) -> str:
-        """Send one gcode line, return the response."""
+        """Send one gcode line, drain all response lines, return the last one.
+
+        GRBL commands like $X emit extra [MSG:...] lines before the terminal
+        ok/error. Reading only one line leaves orphaned bytes in the RX buffer
+        that corrupt the streaming response tracker.
+        """
         with self._lock:
             self._send_raw(cmd)
-            return self._readline()
+            last = ""
+            while True:
+                line = self._readline()
+                if not line:
+                    break
+                last = line
+                if line.startswith(("ok", "error")):
+                    break
+            return last
 
     # --- status ---
 
@@ -59,6 +72,32 @@ class GRBLStreamer:
         with self._lock:
             self._serial.write(b"?")
             return self._readline()
+
+    # --- real-time commands (bypass lock — safe per GRBL protocol) ---
+
+    def _send_realtime(self, byte: bytes) -> None:
+        self._serial.write(byte)
+
+    def feed_hold(self) -> None:
+        self._send_realtime(b"!")
+
+    def cycle_start(self) -> None:
+        self._send_realtime(b"~")
+
+    def feed_override_reset(self) -> None:
+        self._send_realtime(b"\x90")
+
+    def feed_override_plus10(self) -> None:
+        self._send_realtime(b"\x91")
+
+    def feed_override_minus10(self) -> None:
+        self._send_realtime(b"\x92")
+
+    def feed_override_plus1(self) -> None:
+        self._send_realtime(b"\x93")
+
+    def feed_override_minus1(self) -> None:
+        self._send_realtime(b"\x94")
 
     # --- soft-reset ---
 
@@ -75,11 +114,18 @@ class GRBLStreamer:
         path: str | Path,
         on_response=None,
         on_progress=None,
+        on_message=None,
+        status_interval: float = 1.0,
     ) -> None:
         """Stream a gcode file using GRBL's character-counting buffer protocol.
 
         on_response(line_num, response): called for each 'ok'/'error' received
-        on_progress(sent, total):        called after each line sent
+        on_progress(sent, total, line):  called after each line is sent;
+                                         line is the gcode text that was sent
+        on_message(msg):                 called for any other line GRBL sends
+                                         (status reports, [MSG:...], ALARM:, etc.)
+        status_interval:                 seconds between automatic '?' status polls;
+                                         0 disables polling
         """
         lines = Path(path).read_text().splitlines()
         lines = [_strip_comment(l) for l in lines]
@@ -93,29 +139,47 @@ class GRBLStreamer:
 
         self._stop_event.clear()
 
-        while recv_idx < total and not self._stop_event.is_set():
-            # fill the buffer
-            while sent_idx < total and not self._stop_event.is_set():
-                line = lines[sent_idx] + "\n"
-                if buf_used + len(line) > RX_BUFFER_SIZE:
-                    break
-                with self._lock:
-                    self._serial.write(line.encode())
-                buf_counts.append(len(line))
-                buf_used += len(line)
-                sent_idx += 1
-                if on_progress:
-                    on_progress(sent_idx, total)
+        poll_stop = threading.Event()
+        if status_interval > 0:
+            def _poll():
+                while not poll_stop.wait(status_interval):
+                    self._send_realtime(b"?")
+            threading.Thread(target=_poll, daemon=True).start()
 
-            # read one response
-            with self._lock:
-                resp = self._readline()
-            buf_used -= buf_counts.pop(0)
-            recv_idx += 1
-            if on_response:
-                on_response(recv_idx, resp)
-            if resp.startswith("error"):
-                break
+        try:
+            while recv_idx < total and not self._stop_event.is_set():
+                # fill the buffer
+                while sent_idx < total and not self._stop_event.is_set():
+                    line = lines[sent_idx] + "\n"
+                    if buf_used + len(line) > RX_BUFFER_SIZE:
+                        break
+                    with self._lock:
+                        self._serial.write(line.encode())
+                    buf_counts.append(len(line))
+                    buf_used += len(line)
+                    sent_idx += 1
+                    if on_progress:
+                        on_progress(sent_idx, total, line.strip())
+
+                # read until we get the terminal ok/error for this gcode line;
+                # any other lines (status reports, messages, alarms) are routed
+                # to on_message and do not count against the buffer tracker.
+                with self._lock:
+                    while True:
+                        resp = self._readline()
+                        if resp.startswith(("ok", "error")):
+                            break
+                        if on_message:
+                            on_message(resp)
+
+                buf_used -= buf_counts.pop(0)
+                recv_idx += 1
+                if on_response:
+                    on_response(recv_idx, resp)
+                if resp.startswith("error"):
+                    break
+        finally:
+            poll_stop.set()
 
     def stop_stream(self) -> None:
         self._stop_event.set()
