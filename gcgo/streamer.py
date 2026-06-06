@@ -48,12 +48,7 @@ class GRBLStreamer:
     # --- single command (blocking) ---
 
     def send_command(self, cmd: str) -> str:
-        """Send one gcode line, drain all response lines, return the last one.
-
-        GRBL commands like $X emit extra [MSG:...] lines before the terminal
-        ok/error. Reading only one line leaves orphaned bytes in the RX buffer
-        that corrupt the streaming response tracker.
-        """
+        """Send one command, drain all response lines, return the terminal ok/error."""
         with self._lock:
             self._send_raw(cmd)
             last = ""
@@ -65,6 +60,30 @@ class GRBLStreamer:
                 if line.startswith(("ok", "error")):
                     break
             return last
+
+    def send_command_verbose(self, cmd: str, on_line=None, read_timeout: float | None = None) -> None:
+        """Send one command and call on_line for every response line received.
+
+        read_timeout overrides the serial read timeout for this command only,
+        useful for long-running commands like homing ($H).
+        """
+        with self._lock:
+            old_timeout = self._serial.timeout
+            if read_timeout is not None:
+                self._serial.timeout = read_timeout
+            try:
+                self._send_raw(cmd)
+                while True:
+                    line = self._readline()
+                    if not line:
+                        break
+                    if on_line:
+                        on_line(line)
+                    if line.startswith(("ok", "error")):
+                        break
+            finally:
+                if read_timeout is not None:
+                    self._serial.timeout = old_timeout
 
     # --- status ---
 
@@ -141,6 +160,7 @@ class GRBLStreamer:
 
         poll_stop = threading.Event()
         if status_interval > 0:
+            self._send_realtime(b"?")
             def _poll():
                 while not poll_stop.wait(status_interval):
                     self._send_realtime(b"?")
