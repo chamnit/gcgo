@@ -11,6 +11,84 @@ GRBL_BAUD = 115200
 STATUS_POLL_INTERVAL = 0.5
 
 
+class GRBLStatus:
+    """Accumulates GRBL status fields across reports.
+
+    GRBL omits fields that haven't changed (WCO, Ov, Pn), so each update
+    only touches the fields present in that report. Missing Pn means no
+    pins active; all other absent fields retain their last known value.
+    """
+
+    def __init__(self):
+        self.state: str = ""
+        self._mpos: list[float] = [0.0, 0.0, 0.0]
+        self._wco: list[float] = [0.0, 0.0, 0.0]
+        self.feed: float = 0.0
+        self.spindle: float = 0.0
+        self.pins: str = ""
+        self.feed_ov: int = 100
+        self.rapid_ov: int = 100
+        self.spindle_ov: int = 100
+
+    @property
+    def mpos(self) -> tuple[float, float, float]:
+        return (self._mpos[0], self._mpos[1], self._mpos[2])
+
+    @property
+    def wpos(self) -> tuple[float, float, float]:
+        return (
+            self._mpos[0] - self._wco[0],
+            self._mpos[1] - self._wco[1],
+            self._mpos[2] - self._wco[2],
+        )
+
+    @property
+    def wco(self) -> tuple[float, float, float]:
+        return (self._wco[0], self._wco[1], self._wco[2])
+
+    def update(self, raw: str) -> bool:
+        """Parse a GRBL status string and update retained state."""
+        if not (raw.startswith("<") and raw.endswith(">")):
+            return False
+        parts = raw[1:-1].split("|")
+        if not parts:
+            return False
+
+        self.state = parts[0]
+        has_pn = False
+
+        for part in parts[1:]:
+            key, _, val = part.partition(":")
+            if key == "MPos":
+                self._mpos = [float(v) for v in val.split(",")]
+            elif key == "WPos":
+                # derive MPos from WPos + retained WCO
+                wpos = [float(v) for v in val.split(",")]
+                self._mpos = [wpos[i] + self._wco[i] for i in range(3)]
+            elif key == "WCO":
+                self._wco = [float(v) for v in val.split(",")]
+            elif key == "FS":
+                fs = val.split(",")
+                self.feed = float(fs[0])
+                self.spindle = float(fs[1]) if len(fs) > 1 else 0.0
+            elif key == "F":
+                self.feed = float(val)
+            elif key == "Pn":
+                self.pins = val
+                has_pn = True
+            elif key == "Ov":
+                ov = val.split(",")
+                if len(ov) >= 3:
+                    self.feed_ov = int(ov[0])
+                    self.rapid_ov = int(ov[1])
+                    self.spindle_ov = int(ov[2])
+
+        if not has_pn:
+            self.pins = ""
+
+        return True
+
+
 class GRBLStreamer:
     def __init__(self, port: str, baud: int = GRBL_BAUD, timeout: float = 2.0):
         self.port = port
@@ -25,9 +103,16 @@ class GRBLStreamer:
     def connect(self) -> str:
         self._serial = serial.Serial(self.port, self.baud, timeout=self.timeout)
         time.sleep(2)  # GRBL resets on serial open
-        self._serial.flushInput()
-        greeting = self._serial.read_until(b"\n").decode(errors="replace").strip()
-        return greeting
+        return self._read_available()
+
+    def _read_available(self) -> str:
+        """Read all lines currently in the RX buffer, return the last non-empty one."""
+        last = ""
+        while self._serial.in_waiting:
+            line = self._serial.readline().decode(errors="replace").strip()
+            if line:
+                last = line
+        return last
 
     def disconnect(self):
         if self._serial and self._serial.is_open:
@@ -120,11 +205,11 @@ class GRBLStreamer:
 
     # --- soft-reset ---
 
-    def soft_reset(self) -> None:
+    def soft_reset(self) -> str:
         with self._lock:
             self._serial.write(b"\x18")
             time.sleep(1)
-            self._serial.flushInput()
+            return self._read_available()
 
     # --- file streaming (buffer-fill protocol) ---
 

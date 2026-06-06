@@ -2,6 +2,8 @@
 
 import argparse
 import atexit
+import glob
+import json
 import os
 from pathlib import Path
 import readline
@@ -12,25 +14,73 @@ import termios
 import threading
 import tty
 
-from gcgo.streamer import GRBLStreamer
+from gcgo.streamer import GRBLStatus, GRBLStreamer
 
-def _history_file() -> Path:
+
+def _config_dir() -> Path:
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support"
     elif sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home()))
     else:
         base = Path.home() / ".config"
-    return base / "gcgo" / "history"
+    return base / "gcgo"
 
-_HISTORY_FILE = _history_file()
-_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+_CONFIG_DIR = _config_dir()
+_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+_HISTORY_FILE = _CONFIG_DIR / "history"
+_CONFIG_FILE = _CONFIG_DIR / "config.json"
+
 readline.set_history_length(500)
 try:
     readline.read_history_file(_HISTORY_FILE)
 except FileNotFoundError:
     pass
 atexit.register(readline.write_history_file, _HISTORY_FILE)
+
+
+# REPL command names (for tab-completion of the first word)
+COMMANDS = (
+    "load", "run", "mdi", "settings", "params", "unlock", "home", "check",
+    "fo", "config", "reset", "status", "ports", "ls", "cd", "help",
+    "quit", "exit",
+)
+
+# commands whose argument is a filesystem path (for path completion)
+_PATH_COMMANDS = ("load", "cd", "ls")
+
+
+def _path_matches(text: str) -> list[str]:
+    """Filesystem completions for the given partial path."""
+    expanded = os.path.expanduser(text)
+    out = []
+    for p in glob.glob(expanded + "*"):
+        # restore a leading ~ the user typed, since glob expands it away
+        if text.startswith("~"):
+            p = "~" + p[len(os.path.expanduser("~")):]
+        out.append(p + "/" if os.path.isdir(os.path.expanduser(p)) else p)
+    return sorted(out)
+
+
+def _completer(text: str, state: int):
+    line = readline.get_line_buffer().lstrip()
+    if " " not in line:
+        matches = [c + " " for c in COMMANDS if c.startswith(text.lower())]
+    else:
+        cmd = line.split(None, 1)[0].lower()
+        matches = _path_matches(text) if cmd in _PATH_COMMANDS else []
+    return matches[state] if state < len(matches) else None
+
+
+def _install_completer() -> None:
+    # treat only whitespace as word breaks so '/', '.', '-' stay part of paths
+    readline.set_completer_delims(" \t\n")
+    readline.set_completer(_completer)
+    if readline.__doc__ and "libedit" in readline.__doc__:
+        readline.parse_and_bind("bind ^I rl_complete")  # macOS libedit
+    else:
+        readline.parse_and_bind("tab: complete")
 
 
 _stdout_lock = threading.Lock()
@@ -54,6 +104,135 @@ def _redraw_status(status: str) -> None:
         sys.stdout.flush()
 
 
+class StatusConfig:
+    """Streaming status display config: which fields show and how often
+    GRBL is polled for a status report.
+
+    Choices are persisted so they stick per install/machine.
+    """
+
+    DEFAULT_RATE = 1.0     # seconds between '?' status polls; 0 disables
+    DEFAULT_UNITS = "mm"   # "mm" or "inch"; gcgo owns GRBL's $13 to match
+
+    # ordered (key, description, default) — order is the display order
+    FIELDS = (
+        ("state",      "machine state",      True),
+        ("wpos",       "work position",      True),
+        ("mpos",       "machine position",   False),
+        ("wco",        "work coord offset",  False),
+        ("feed",       "feed rate",          True),
+        ("spindle",    "spindle speed",      True),
+        ("feed_ov",    "feed override",      True),
+        ("rapid_ov",   "rapid override",     True),
+        ("spindle_ov", "spindle override",   True),
+        ("pins",       "limit/control pins", True),
+    )
+
+    def __init__(self):
+        self.show = {key: default for key, _, default in self.FIELDS}
+        self.rate = self.DEFAULT_RATE
+        self.units = self.DEFAULT_UNITS
+
+    @property
+    def pos_unit(self) -> str:
+        return "in" if self.units == "inch" else "mm"
+
+    @property
+    def feed_unit(self) -> str:
+        return "in/min" if self.units == "inch" else "mm/min"
+
+    @property
+    def grbl_inch(self) -> str:
+        """The $13 value matching this units setting."""
+        return "1" if self.units == "inch" else "0"
+
+    def load(self, path: Path) -> None:
+        try:
+            data = json.loads(path.read_text())
+        except (FileNotFoundError, ValueError):
+            return
+        fields = data.get("fields", {})
+        for key in self.show:
+            if key in fields:
+                self.show[key] = bool(fields[key])
+        if "rate" in data:
+            try:
+                self.rate = max(0.0, float(data["rate"]))
+            except (TypeError, ValueError):
+                pass
+        if data.get("units") in ("mm", "inch"):
+            self.units = data["units"]
+
+    def save(self, path: Path) -> None:
+        path.write_text(json.dumps(
+            {"fields": self.show, "rate": self.rate, "units": self.units},
+            indent=2,
+        ))
+
+
+def _format_status_line(st: GRBLStatus, progress: str, cfg: StatusConfig) -> str:
+    """Compact single-line status for the streaming display.
+
+    All values are fixed-width so they stay put when the line is reprinted.
+    Fields can be turned off via StatusConfig.
+    """
+    if not st.state:
+        return progress
+    show = cfg.show
+    u = cfg.pos_unit
+    wx, wy, wz = st.wpos
+    mx, my, mz = st.mpos
+    ox, oy, oz = st.wco
+    pins = st.pins if st.pins else "-"
+
+    parts = []
+    if show["state"]:
+        parts.append(f"[{st.state:^7}]")
+    if show["wpos"]:
+        parts.append(f"W:{wx:9.3f} {wy:9.3f} {wz:9.3f} {u}")
+    if show["mpos"]:
+        parts.append(f"M:{mx:9.3f} {my:9.3f} {mz:9.3f} {u}")
+    if show["wco"]:
+        parts.append(f"O:{ox:9.3f} {oy:9.3f} {oz:9.3f} {u}")
+    if show["feed"]:
+        parts.append(f"F:{st.feed:6.0f} {cfg.feed_unit}")
+    if show["spindle"]:
+        parts.append(f"S:{st.spindle:6.0f} RPM")
+
+    ov = []
+    if show["feed_ov"]:
+        ov.append(f"F{st.feed_ov:3d}%")
+    if show["rapid_ov"]:
+        ov.append(f"R{st.rapid_ov:3d}%")
+    if show["spindle_ov"]:
+        ov.append(f"S{st.spindle_ov:3d}%")
+    if ov:
+        parts.append("Ov:" + " ".join(ov))
+
+    if show["pins"]:
+        parts.append(f"Pn:{pins:<5}")
+    if progress:
+        parts.append(progress)
+    return " | ".join(parts)
+
+
+def _print_status_detail(st: GRBLStatus, cfg: StatusConfig) -> None:
+    """Multi-line formatted status for the status command."""
+    u = cfg.pos_unit
+    wx, wy, wz = st.wpos
+    mx, my, mz = st.mpos
+    pins_str = " ".join(st.pins) if st.pins else "none"
+    print(f"""
+  State:      {st.state}
+  Work pos:   X: {wx:10.3f}  Y: {wy:10.3f}  Z: {wz:10.3f}  {u}
+  Mach pos:   X: {mx:10.3f}  Y: {my:10.3f}  Z: {mz:10.3f}  {u}
+  Feed:       {st.feed:.0f} {cfg.feed_unit}
+  Spindle:    {st.spindle:.0f} RPM
+  Overrides:  Feed {st.feed_ov}%  Rapid {st.rapid_ov}%  Spindle {st.spindle_ov}%
+  Limit pins: {pins_str}
+""")
+
+
 HELP = """
 Commands:
   load <file>   Load a gcode file (does not start streaming)
@@ -65,12 +244,16 @@ Commands:
   home          Run homing cycle ($H)
   check         Toggle check mode ($C)
   fo            Reset feed rate override to 100%
+  config        Configure status fields, query rate, and units
   reset         Send GRBL soft-reset (Ctrl-X)
   status        Query GRBL status (?)
   ports         List available serial ports
+  ls [dir]      List files in a directory
+  cd [dir]      Change working directory
   help          Show this message
   quit / exit   Exit
 
+Tab completes commands and file paths (load/cd/ls).
 """
 
 # GRBL 1.1 setting index → (description, unit)
@@ -238,9 +421,18 @@ def list_ports() -> list[str]:
     return [p.device for p in list_ports.comports()]
 
 
-def _run_mdi(streamer: GRBLStreamer) -> None:
+def _run_mdi(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
     """MDI mode: send gcode commands one at a time. Exit with 'exit' or Ctrl-C."""
     print("MDI mode — type gcode commands, 'exit' to return.")
+    saved_completer = readline.get_completer()
+    readline.set_completer(None)  # no command/path completion at the mdi> prompt
+    try:
+        _mdi_loop(streamer, cfg)
+    finally:
+        readline.set_completer(saved_completer)
+
+
+def _mdi_loop(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
     while True:
         try:
             line = input("mdi> ").strip()
@@ -252,25 +444,31 @@ def _run_mdi(streamer: GRBLStreamer) -> None:
         if line.lower() == "exit":
             break
 
-        # Real-time commands: bypass the normal send/wait-for-ok path.
+        # Commands that need special handling outside the normal send/wait-for-ok path.
         if line == "?":
             print(f"  {streamer.query_status()}")
         elif line == "!":
             streamer.feed_hold()
         elif line == "~":
             streamer.cycle_start()
+        elif "\x18" in line:
+            greeting = streamer.soft_reset()
+            if greeting:
+                print(f"  {greeting}")
         else:
             streamer.send_command_verbose(line, on_line=lambda l: print(f"  {l}"))
+            # gcgo owns $13 to keep status units in sync with its labels.
+            if line.replace(" ", "").lower().startswith("$13="):
+                _apply_units(streamer, cfg)
+                print(f"  [gcgo] $13 re-asserted to {cfg.grbl_inch} (units={cfg.units})")
 
 
-def _run_stream(streamer: GRBLStreamer, path: str) -> None:
+def _run_stream(streamer: GRBLStreamer, path: str, st: GRBLStatus, cfg: StatusConfig) -> None:
     """Stream a file and read interactive keypresses until done."""
-    grbl_status = ""
     progress = ""
 
     def status_line() -> str:
-        parts = [p for p in (grbl_status, progress) if p]
-        return "  ".join(parts)
+        return _format_status_line(st, progress, cfg)
 
     def on_response(n, resp):
         if not resp.startswith("ok"):
@@ -289,9 +487,8 @@ def _run_stream(streamer: GRBLStreamer, path: str) -> None:
         _print_above(f"  >> {line}", status_line())
 
     def on_message(msg):
-        nonlocal grbl_status
         if msg.startswith("<"):
-            grbl_status = msg
+            st.update(msg)
             _redraw_status(status_line())
         else:
             _print_above(f"  {msg}", status_line())
@@ -305,6 +502,7 @@ def _run_stream(streamer: GRBLStreamer, path: str) -> None:
                 on_response=on_response,
                 on_progress=on_progress,
                 on_message=on_message,
+                status_interval=cfg.rate,
             )
         except Exception as e:
             _print_above(f"  Stream error: {e}", "")
@@ -353,6 +551,71 @@ def _run_stream(streamer: GRBLStreamer, path: str) -> None:
         sys.stdout.flush()
 
 
+def _apply_units(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
+    """Write GRBL's $13 to match the configured display units."""
+    streamer.send_command(f"$13={cfg.grbl_inch}")
+
+
+def _run_config(cfg: StatusConfig, arg: str, streamer: GRBLStreamer) -> None:
+    """View or set gcgo display config (status fields, poll rate, units)."""
+    valid = {key for key, _, _ in StatusConfig.FIELDS}
+    parts = arg.split()
+
+    if not parts:
+        print("Streaming status config:")
+        for key, desc, _ in StatusConfig.FIELDS:
+            state = "on " if cfg.show[key] else "off"
+            print(f"  [{state}] {key:<11} {desc}")
+        rate = f"{cfg.rate}s" if cfg.rate > 0 else "off"
+        print(f"        rate        status query rate ({rate})")
+        print(f"        units       report units / $13 ({cfg.units})")
+        print("Usage: config <field> [on|off]   (omit on/off to toggle)")
+        print("       config rate <seconds>     (0 disables polling)")
+        print("       config units <mm|inch>")
+        return
+
+    key = parts[0].lower()
+
+    if key == "rate":
+        if len(parts) > 1:
+            try:
+                cfg.rate = max(0.0, float(parts[1]))
+            except ValueError:
+                print(f"Invalid rate: {parts[1]!r}")
+                return
+            cfg.save(_CONFIG_FILE)
+        rate = f"{cfg.rate}s" if cfg.rate > 0 else "off"
+        print(f"  rate = {rate}")
+        return
+
+    if key == "units":
+        if len(parts) > 1:
+            val = parts[1].lower()
+            if val in ("mm", "metric"):
+                cfg.units = "mm"
+            elif val in ("inch", "inches", "in", "imperial"):
+                cfg.units = "inch"
+            else:
+                print(f"Invalid units: {parts[1]!r} (use mm or inch)")
+                return
+            cfg.save(_CONFIG_FILE)
+            _apply_units(streamer, cfg)
+        print(f"  units = {cfg.units}  ($13={cfg.grbl_inch})")
+        return
+
+    if key not in valid:
+        print(f"Unknown field: {key!r}. Valid: {', '.join(sorted(valid))}, rate, units")
+        return
+
+    if len(parts) > 1:
+        cfg.show[key] = parts[1].lower() in ("on", "1", "true", "yes")
+    else:
+        cfg.show[key] = not cfg.show[key]
+
+    cfg.save(_CONFIG_FILE)
+    print(f"  {key} = {'on' if cfg.show[key] else 'off'}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="gcgo",
@@ -384,6 +647,9 @@ def main():
 
     streamer = GRBLStreamer(port, args.baud)
     loaded_file: str | None = None
+    grbl_status = GRBLStatus()
+    field_config = StatusConfig()
+    field_config.load(_CONFIG_FILE)
 
     print(f"Connecting to {port} at {args.baud} baud...")
     try:
@@ -393,6 +659,11 @@ def main():
         print(f"Connection failed: {e}")
         sys.exit(1)
 
+    # gcgo owns GRBL's $13 so report units always match its display labels.
+    _apply_units(streamer, field_config)
+    print(f"Report units: {field_config.units} ($13={field_config.grbl_inch})")
+
+    _install_completer()
     print(HELP)
 
     try:
@@ -424,11 +695,27 @@ def main():
                 if not arg:
                     print("Usage: load <file>")
                 else:
-                    loaded_file = arg
+                    loaded_file = os.path.expanduser(arg)
                     print(f"Loaded: {loaded_file}")
 
+            elif cmd == "ls":
+                target = os.path.expanduser(arg) if arg else "."
+                try:
+                    for name in sorted(os.listdir(target)):
+                        suffix = "/" if os.path.isdir(os.path.join(target, name)) else ""
+                        print(f"  {name}{suffix}")
+                except OSError as e:
+                    print(f"  {e}")
+
+            elif cmd == "cd":
+                try:
+                    os.chdir(os.path.expanduser(arg) if arg else Path.home())
+                    print(f"  {os.getcwd()}")
+                except OSError as e:
+                    print(f"  {e}")
+
             elif cmd == "mdi":
-                _run_mdi(streamer)
+                _run_mdi(streamer, field_config)
 
             elif cmd == "settings":
                 _print_settings(streamer)
@@ -450,18 +737,24 @@ def main():
                 if not loaded_file:
                     print("No file loaded. Use: load <file>")
                 else:
-                    _run_stream(streamer, loaded_file)
+                    _run_stream(streamer, loaded_file, grbl_status, field_config)
+
+            elif cmd == "config":
+                _run_config(field_config, arg, streamer)
 
             elif cmd == "fo":
                 streamer.feed_override_reset()
                 print("Feed override reset to 100%.")
 
             elif cmd == "reset":
-                streamer.soft_reset()
-                print("Reset sent.")
+                greeting = streamer.soft_reset()
+                if greeting:
+                    print(f"  {greeting}")
 
             elif cmd == "status":
-                print(streamer.query_status())
+                raw = streamer.query_status()
+                grbl_status.update(raw)
+                _print_status_detail(grbl_status, field_config)
 
             else:
                 print(f"Unknown command: {cmd!r}. Type 'help' for available commands or 'mdi' to send gcode directly.")
