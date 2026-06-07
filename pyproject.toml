@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "gcgo"
 version = "0.1.0"
 description = "Interactive GRBL gcode streamer"
+authors = [{ name = "Sungeun K. Jeon", email = "chamnit@gmail.com" }]
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
