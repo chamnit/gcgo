@@ -102,3 +102,7 @@ re-asserts it if you change `$13` in MDI.
 - Python 3.11+
 - `pyserial`
 - A GRBL 1.1 controller (e.g. an Arduino running GRBL)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
