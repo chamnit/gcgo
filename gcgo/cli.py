@@ -3,7 +3,6 @@
 import argparse
 import atexit
 import glob
-import json
 import os
 from pathlib import Path
 import readline
@@ -14,7 +13,17 @@ import termios
 import threading
 import tty
 
-from gcgo.streamer import GRBLStatus, GRBLStreamer, load_gcode
+from gcgo.core.config import StatusConfig
+from gcgo.core.status import GRBLStatus
+from gcgo.core.tables import (
+    ACTION_DESC as _ACTION_DESC,
+    ACTION_METHOD as _ACTION_METHOD,
+    GRBL_ERRORS as _GRBL_ERRORS,
+    GRBL_SETTINGS as _GRBL_SETTINGS,
+    PARAM_NAMES as _PARAM_NAMES,
+    STREAM_ACTIONS,
+)
+from gcgo.streamer import GRBLStreamer, load_gcode
 
 
 def _config_dir() -> Path:
@@ -111,128 +120,6 @@ def _grbl(line: str) -> str:
     return f'  "{line}"'
 
 
-# Streaming real-time key actions, in display order.
-# (id, description, default_key, default_enabled, streamer_method)
-# method is None for the special "stop streaming" action.
-STREAM_ACTIONS = (
-    ("hold",          "feed hold",             "!", True,  "feed_hold"),
-    ("resume",        "cycle start / resume",  "~", True,  "cycle_start"),
-    ("stop",          "stop streaming",        "q", True,  None),
-    ("feed_reset",    "feed override 100%",    "0", True,  "feed_override_reset"),
-    ("feed_up",       "feed override +10%",    "+", True,  "feed_override_plus10"),
-    ("feed_down",     "feed override -10%",    "-", True,  "feed_override_minus10"),
-    ("feed_up1",      "feed override +1%",     "",  False, "feed_override_plus1"),
-    ("feed_down1",    "feed override -1%",     "",  False, "feed_override_minus1"),
-    ("rapid_100",     "rapid override 100%",   "",  False, "rapid_override_full"),
-    ("rapid_50",      "rapid override 50%",    "",  False, "rapid_override_half"),
-    ("rapid_25",      "rapid override 25%",    "",  False, "rapid_override_quarter"),
-    ("spindle_reset", "spindle override 100%", "",  False, "spindle_override_reset"),
-    ("spindle_up",    "spindle override +10%", "",  False, "spindle_override_plus10"),
-    ("spindle_down",  "spindle override -10%", "",  False, "spindle_override_minus10"),
-    ("spindle_up1",   "spindle override +1%",  "",  False, "spindle_override_plus1"),
-    ("spindle_down1", "spindle override -1%",  "",  False, "spindle_override_minus1"),
-    ("spindle_stop",  "toggle spindle stop",   "",  False, "spindle_stop_toggle"),
-    ("flood",         "toggle flood coolant",  "",  False, "flood_toggle"),
-    ("mist",          "toggle mist coolant",   "",  False, "mist_toggle"),
-)
-_ACTION_METHOD = {aid: method for aid, _d, _k, _e, method in STREAM_ACTIONS}
-_ACTION_DESC = {aid: desc for aid, desc, _k, _e, _m in STREAM_ACTIONS}
-
-
-class StatusConfig:
-    """gcgo display/interaction config: status fields, poll rate, units,
-    and streaming real-time key bindings.
-
-    Choices are persisted so they stick per install/machine.
-    """
-
-    DEFAULT_RATE = 1.0       # seconds between '?' status polls; 0 disables
-    DEFAULT_UNITS = "mm"     # "mm" or "inch"; gcgo owns GRBL's $13 to match
-    DEFAULT_AFTER = "keep"   # after a completed run: "keep" or "clear" the file
-
-    # ordered (key, description, default) — order is the display order
-    FIELDS = (
-        ("state",      "machine state",      True),
-        ("wpos",       "work position",      True),
-        ("mpos",       "machine position",   False),
-        ("wco",        "work coord offset",  False),
-        ("feed",       "feed rate",          True),
-        ("spindle",    "spindle speed",      True),
-        ("feed_ov",    "feed override",      True),
-        ("rapid_ov",   "rapid override",     True),
-        ("spindle_ov", "spindle override",   True),
-        ("pins",       "limit/control pins", True),
-    )
-
-    def __init__(self):
-        self.show = {key: default for key, _, default in self.FIELDS}
-        self.rate = self.DEFAULT_RATE
-        self.units = self.DEFAULT_UNITS
-        self.after = self.DEFAULT_AFTER
-        self.keys = {
-            aid: {"key": dkey, "enabled": denabled}
-            for aid, _desc, dkey, denabled, _m in STREAM_ACTIONS
-        }
-
-    @property
-    def pos_unit(self) -> str:
-        return "in" if self.units == "inch" else "mm"
-
-    @property
-    def feed_unit(self) -> str:
-        return "in/min" if self.units == "inch" else "mm/min"
-
-    @property
-    def grbl_inch(self) -> str:
-        """The $13 value matching this units setting."""
-        return "1" if self.units == "inch" else "0"
-
-    def load(self, path: Path) -> None:
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError):
-            return  # missing, unreadable, or invalid JSON — keep defaults
-        if not isinstance(data, dict):
-            return
-        fields = data.get("fields", {})
-        if not isinstance(fields, dict):
-            fields = {}
-        for key in self.show:
-            if key in fields:
-                self.show[key] = bool(fields[key])
-        if "rate" in data:
-            try:
-                self.rate = max(0.0, float(data["rate"]))
-            except (TypeError, ValueError):
-                pass
-        if data.get("units") in ("mm", "inch"):
-            self.units = data["units"]
-        if data.get("after") in ("keep", "clear"):
-            self.after = data["after"]
-        saved_keys = data.get("keys", {})
-        if not isinstance(saved_keys, dict):
-            saved_keys = {}
-        for aid, entry in self.keys.items():
-            k = saved_keys.get(aid)
-            if isinstance(k, dict):
-                if "key" in k:
-                    entry["key"] = str(k["key"])
-                if "enabled" in k:
-                    entry["enabled"] = bool(k["enabled"])
-
-    def save(self, path: Path) -> None:
-        path.write_text(json.dumps(
-            {
-                "fields": self.show,
-                "rate": self.rate,
-                "units": self.units,
-                "after": self.after,
-                "keys": self.keys,
-            },
-            indent=2,
-        ))
-
-
 def _format_status_line(st: GRBLStatus, progress: str, cfg: StatusConfig) -> str:
     """Compact single-line status for the streaming display.
 
@@ -318,45 +205,6 @@ Commands:
 Tab completes commands and file paths (load/cd/ls).
 """
 
-# GRBL 1.1 setting index → (description, unit)
-# unit "bool" triggers enabled/disabled formatting
-_GRBL_SETTINGS: dict[int, tuple[str, str]] = {
-    0:   ("Step pulse time",            "µs"),
-    1:   ("Step idle delay",            "ms"),
-    2:   ("Step pulse invert",          "mask"),
-    3:   ("Step direction invert",      "mask"),
-    4:   ("Invert step enable pin",     "bool"),
-    5:   ("Invert limit pins",          "bool"),
-    6:   ("Invert probe pin",           "bool"),
-    10:  ("Status report options",      "mask"),
-    11:  ("Junction deviation",         "mm"),
-    12:  ("Arc tolerance",              "mm"),
-    13:  ("Report in inches",           "bool"),
-    20:  ("Soft limits",                "bool"),
-    21:  ("Hard limits",                "bool"),
-    22:  ("Homing cycle",               "bool"),
-    23:  ("Homing direction invert",    "mask"),
-    24:  ("Homing locate feed rate",    "mm/min"),
-    25:  ("Homing search seek rate",    "mm/min"),
-    26:  ("Homing switch debounce",     "ms"),
-    27:  ("Homing switch pull-off",     "mm"),
-    30:  ("Max spindle speed",          "RPM"),
-    31:  ("Min spindle speed",          "RPM"),
-    32:  ("Laser mode",                 "bool"),
-    100: ("X-axis steps/mm",            "steps/mm"),
-    101: ("Y-axis steps/mm",            "steps/mm"),
-    102: ("Z-axis steps/mm",            "steps/mm"),
-    110: ("X-axis max rate",            "mm/min"),
-    111: ("Y-axis max rate",            "mm/min"),
-    112: ("Z-axis max rate",            "mm/min"),
-    120: ("X-axis acceleration",        "mm/sec²"),
-    121: ("Y-axis acceleration",        "mm/sec²"),
-    122: ("Z-axis acceleration",        "mm/sec²"),
-    130: ("X-axis max travel",          "mm"),
-    131: ("Y-axis max travel",          "mm"),
-    132: ("Z-axis max travel",          "mm"),
-}
-
 
 def _print_settings(streamer: GRBLStreamer) -> None:
     raw_lines: list[str] = []
@@ -387,21 +235,6 @@ def _print_settings(streamer: GRBLStreamer) -> None:
         desc_str = f"  {desc}" if desc else ""
         print(f"  {key:<5} = {val_str:<24}{desc_str}")
     print()
-
-
-_PARAM_NAMES: dict[str, str] = {
-    "G54": "Work offset 1",
-    "G55": "Work offset 2",
-    "G56": "Work offset 3",
-    "G57": "Work offset 4",
-    "G58": "Work offset 5",
-    "G59": "Work offset 6",
-    "G28": "Stored home 1",
-    "G30": "Stored home 2",
-    "G92": "Coordinate offset",
-    "TLO": "Tool length offset",
-    "PRB": "Probe position",
-}
 
 
 def _print_params(streamer: GRBLStreamer) -> None:
@@ -450,48 +283,6 @@ def _build_keymap(cfg: StatusConfig) -> dict[str, str]:
         for aid, _d, _k, _e, _m in STREAM_ACTIONS
         if cfg.keys[aid]["enabled"] and cfg.keys[aid]["key"]
     }
-
-# GRBL 1.1 error code → human-readable description
-_GRBL_ERRORS: dict[int, str] = {
-    1:  "Expected command letter",
-    2:  "Bad number format",
-    3:  "Invalid statement",
-    4:  "Negative value not allowed",
-    5:  "Setting disabled",
-    6:  "Step pulse time must be > 3 µs",
-    7:  "EEPROM read failed — using defaults",
-    8:  "Command only valid when idle",
-    9:  "G-code locked out during alarm or jog state",
-    10: "Soft limits require homing to be enabled",
-    11: "Line too long — truncated",
-    12: "Step rate would exceed 30 kHz",
-    13: "Safety door opened",
-    14: "Build info or startup line too long for EEPROM",
-    15: "Jog target exceeds machine travel",
-    16: "Invalid jog command",
-    17: "Laser mode requires PWM output",
-    20: "Unsupported g-code command",
-    21: "Modal group violation — conflicting g-code commands",
-    22: "Feed rate undefined",
-    23: "G-code command requires an integer value",
-    24: "Two commands both require XYZ axis words",
-    25: "G-code word repeated in block",
-    26: "Axis words required but not found",
-    27: "Line number out of range (1–9,999,999)",
-    28: "Missing required P or L value",
-    29: "Axis words present but unused by any command",
-    30: "No axis words found for command that requires them",
-    31: "Value of zero not allowed",
-    32: "Arc motion requires a specific active plane",
-    33: "Arc radius tolerance exceeded — not a valid arc",
-    34: "Missing required value word for command",
-    35: "G53 requires G0 or G1 motion mode",
-    36: "Unused axis words with G80 active",
-    37: "Missing offset word for G2/G3 arc",
-    38: "Motion command targets unconfigured axis",
-    39: "Invalid G2/G3 target or undefined radius",
-}
-
 
 def list_ports() -> list[str]:
     from serial.tools import list_ports
