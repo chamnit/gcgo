@@ -14,7 +14,7 @@ import termios
 import threading
 import tty
 
-from gcgo.streamer import GRBLStatus, GRBLStreamer
+from gcgo.streamer import GRBLStatus, GRBLStreamer, load_gcode
 
 
 def _config_dir() -> Path:
@@ -35,15 +35,15 @@ _CONFIG_FILE = _CONFIG_DIR / "config.json"
 readline.set_history_length(500)
 try:
     readline.read_history_file(_HISTORY_FILE)
-except FileNotFoundError:
-    pass
+except OSError:
+    pass  # missing, unreadable, or malformed history — start fresh
 atexit.register(readline.write_history_file, _HISTORY_FILE)
 
 
 # REPL command names (for tab-completion of the first word)
 COMMANDS = (
     "load", "run", "mdi", "settings", "params", "unlock", "home", "check",
-    "fo", "config", "reset", "status", "ports", "ls", "cd", "help",
+    "config", "reset", "status", "ports", "ls", "cd", "help",
     "quit", "exit",
 )
 
@@ -104,15 +104,51 @@ def _redraw_status(status: str) -> None:
         sys.stdout.flush()
 
 
+def _grbl(line: str) -> str:
+    """Format a raw GRBL message for display: indented and quoted, so GRBL's
+    own words (ok, error:N, [MSG:...], the welcome string) are visually
+    distinct from gcgo's output."""
+    return f'  "{line}"'
+
+
+# Streaming real-time key actions, in display order.
+# (id, description, default_key, default_enabled, streamer_method)
+# method is None for the special "stop streaming" action.
+STREAM_ACTIONS = (
+    ("hold",          "feed hold",             "!", True,  "feed_hold"),
+    ("resume",        "cycle start / resume",  "~", True,  "cycle_start"),
+    ("stop",          "stop streaming",        "q", True,  None),
+    ("feed_reset",    "feed override 100%",    "0", True,  "feed_override_reset"),
+    ("feed_up",       "feed override +10%",    "+", True,  "feed_override_plus10"),
+    ("feed_down",     "feed override -10%",    "-", True,  "feed_override_minus10"),
+    ("feed_up1",      "feed override +1%",     "",  False, "feed_override_plus1"),
+    ("feed_down1",    "feed override -1%",     "",  False, "feed_override_minus1"),
+    ("rapid_100",     "rapid override 100%",   "",  False, "rapid_override_full"),
+    ("rapid_50",      "rapid override 50%",    "",  False, "rapid_override_half"),
+    ("rapid_25",      "rapid override 25%",    "",  False, "rapid_override_quarter"),
+    ("spindle_reset", "spindle override 100%", "",  False, "spindle_override_reset"),
+    ("spindle_up",    "spindle override +10%", "",  False, "spindle_override_plus10"),
+    ("spindle_down",  "spindle override -10%", "",  False, "spindle_override_minus10"),
+    ("spindle_up1",   "spindle override +1%",  "",  False, "spindle_override_plus1"),
+    ("spindle_down1", "spindle override -1%",  "",  False, "spindle_override_minus1"),
+    ("spindle_stop",  "toggle spindle stop",   "",  False, "spindle_stop_toggle"),
+    ("flood",         "toggle flood coolant",  "",  False, "flood_toggle"),
+    ("mist",          "toggle mist coolant",   "",  False, "mist_toggle"),
+)
+_ACTION_METHOD = {aid: method for aid, _d, _k, _e, method in STREAM_ACTIONS}
+_ACTION_DESC = {aid: desc for aid, desc, _k, _e, _m in STREAM_ACTIONS}
+
+
 class StatusConfig:
-    """Streaming status display config: which fields show and how often
-    GRBL is polled for a status report.
+    """gcgo display/interaction config: status fields, poll rate, units,
+    and streaming real-time key bindings.
 
     Choices are persisted so they stick per install/machine.
     """
 
-    DEFAULT_RATE = 1.0     # seconds between '?' status polls; 0 disables
-    DEFAULT_UNITS = "mm"   # "mm" or "inch"; gcgo owns GRBL's $13 to match
+    DEFAULT_RATE = 1.0       # seconds between '?' status polls; 0 disables
+    DEFAULT_UNITS = "mm"     # "mm" or "inch"; gcgo owns GRBL's $13 to match
+    DEFAULT_AFTER = "keep"   # after a completed run: "keep" or "clear" the file
 
     # ordered (key, description, default) — order is the display order
     FIELDS = (
@@ -132,6 +168,11 @@ class StatusConfig:
         self.show = {key: default for key, _, default in self.FIELDS}
         self.rate = self.DEFAULT_RATE
         self.units = self.DEFAULT_UNITS
+        self.after = self.DEFAULT_AFTER
+        self.keys = {
+            aid: {"key": dkey, "enabled": denabled}
+            for aid, _desc, dkey, denabled, _m in STREAM_ACTIONS
+        }
 
     @property
     def pos_unit(self) -> str:
@@ -149,9 +190,13 @@ class StatusConfig:
     def load(self, path: Path) -> None:
         try:
             data = json.loads(path.read_text())
-        except (FileNotFoundError, ValueError):
+        except (OSError, ValueError):
+            return  # missing, unreadable, or invalid JSON — keep defaults
+        if not isinstance(data, dict):
             return
         fields = data.get("fields", {})
+        if not isinstance(fields, dict):
+            fields = {}
         for key in self.show:
             if key in fields:
                 self.show[key] = bool(fields[key])
@@ -162,10 +207,28 @@ class StatusConfig:
                 pass
         if data.get("units") in ("mm", "inch"):
             self.units = data["units"]
+        if data.get("after") in ("keep", "clear"):
+            self.after = data["after"]
+        saved_keys = data.get("keys", {})
+        if not isinstance(saved_keys, dict):
+            saved_keys = {}
+        for aid, entry in self.keys.items():
+            k = saved_keys.get(aid)
+            if isinstance(k, dict):
+                if "key" in k:
+                    entry["key"] = str(k["key"])
+                if "enabled" in k:
+                    entry["enabled"] = bool(k["enabled"])
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(
-            {"fields": self.show, "rate": self.rate, "units": self.units},
+            {
+                "fields": self.show,
+                "rate": self.rate,
+                "units": self.units,
+                "after": self.after,
+                "keys": self.keys,
+            },
             indent=2,
         ))
 
@@ -243,9 +306,8 @@ Commands:
   unlock        Unlock GRBL alarm state ($X)
   home          Run homing cycle ($H)
   check         Toggle check mode ($C)
-  fo            Reset feed rate override to 100%
-  config        Configure status fields, query rate, and units
-  reset         Send GRBL soft-reset (Ctrl-X)
+  config        Configure status fields, rate, units, and stream keys
+  reset         Send GRBL soft-reset (Ctrl-X); restores overrides to 100%
   status        Query GRBL status (?)
   ports         List available serial ports
   ls [dir]      List files in a directory
@@ -369,10 +431,25 @@ def _print_params(streamer: GRBLStreamer) -> None:
             print(f"  {key}  {name:<18}  X: {x:>10}  Y: {y:>10}  Z: {z:>10}")
     print()
 
-STREAM_KEYS = (
-    "  Streaming — keys: [!] hold  [~] resume  "
-    "[+/-] feed ±10%  [0] feed reset  [q] stop\n"
-)
+def _stream_keys_banner(cfg: StatusConfig) -> str:
+    """Build the streaming key-hint banner from the enabled bindings."""
+    bound = [
+        f"[{cfg.keys[aid]['key']}] {desc}"
+        for aid, desc, _k, _e, _m in STREAM_ACTIONS
+        if cfg.keys[aid]["enabled"] and cfg.keys[aid]["key"]
+    ]
+    if not bound:
+        return "  Streaming (no keys bound — use 'keys' to configure)\n"
+    return "  Streaming — " + "   ".join(bound) + "\n"
+
+
+def _build_keymap(cfg: StatusConfig) -> dict[str, str]:
+    """char -> action id for all enabled, bound actions."""
+    return {
+        cfg.keys[aid]["key"]: aid
+        for aid, _d, _k, _e, _m in STREAM_ACTIONS
+        if cfg.keys[aid]["enabled"] and cfg.keys[aid]["key"]
+    }
 
 # GRBL 1.1 error code → human-readable description
 _GRBL_ERRORS: dict[int, str] = {
@@ -446,7 +523,7 @@ def _mdi_loop(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
 
         # Commands that need special handling outside the normal send/wait-for-ok path.
         if line == "?":
-            print(f"  {streamer.query_status()}")
+            print(_grbl(streamer.query_status()))
         elif line == "!":
             streamer.feed_hold()
         elif line == "~":
@@ -454,36 +531,45 @@ def _mdi_loop(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
         elif "\x18" in line:
             greeting = streamer.soft_reset()
             if greeting:
-                print(f"  {greeting}")
+                print(_grbl(greeting))
         else:
-            streamer.send_command_verbose(line, on_line=lambda l: print(f"  {l}"))
+            streamer.send_command_verbose(line, on_line=lambda l: print(_grbl(l)))
             # gcgo owns $13 to keep status units in sync with its labels.
             if line.replace(" ", "").lower().startswith("$13="):
                 _apply_units(streamer, cfg)
                 print(f"  [gcgo] $13 re-asserted to {cfg.grbl_inch} (units={cfg.units})")
 
 
-def _run_stream(streamer: GRBLStreamer, path: str, st: GRBLStatus, cfg: StatusConfig) -> None:
-    """Stream a file and read interactive keypresses until done."""
+def _run_stream(streamer: GRBLStreamer, path: str, st: GRBLStatus, cfg: StatusConfig) -> bool:
+    """Stream a file and read interactive keypresses until done.
+
+    Returns True only if the stream completed cleanly (no error, not stopped).
+    """
     progress = ""
+    sent = total = 0
+    errored = False
+    stopped = False
 
     def status_line() -> str:
         return _format_status_line(st, progress, cfg)
 
     def on_response(n, resp):
+        nonlocal errored
         if not resp.startswith("ok"):
             desc = ""
             if resp.startswith("error:"):
+                errored = True
                 try:
                     code = int(resp.split(":")[1])
                     desc = f"  — {_GRBL_ERRORS[code]}" if code in _GRBL_ERRORS else ""
                 except (IndexError, ValueError):
                     pass
-            _print_above(f"  [{n}] {resp}{desc}", status_line())
+            _print_above(f'  [{n}] "{resp}"{desc}', status_line())
 
     def on_progress(s, t, line):
-        nonlocal progress
+        nonlocal progress, sent, total
         progress = f"{s}/{t} ({s * 100 // t}%)"
+        sent, total = s, t
         _print_above(f"  >> {line}", status_line())
 
     def on_message(msg):
@@ -491,11 +577,12 @@ def _run_stream(streamer: GRBLStreamer, path: str, st: GRBLStatus, cfg: StatusCo
             st.update(msg)
             _redraw_status(status_line())
         else:
-            _print_above(f"  {msg}", status_line())
+            _print_above(_grbl(msg), status_line())
 
     stream_done = threading.Event()
 
     def _stream():
+        nonlocal errored
         try:
             streamer.stream_file(
                 path,
@@ -505,13 +592,15 @@ def _run_stream(streamer: GRBLStreamer, path: str, st: GRBLStatus, cfg: StatusCo
                 status_interval=cfg.rate,
             )
         except Exception as e:
+            errored = True
             _print_above(f"  Stream error: {e}", "")
         finally:
             stream_done.set()
 
     threading.Thread(target=_stream, daemon=True).start()
 
-    sys.stdout.write(STREAM_KEYS)
+    keymap = _build_keymap(cfg)
+    sys.stdout.write(_stream_keys_banner(cfg))
     sys.stdout.flush()
 
     if sys.stdin.isatty():
@@ -522,33 +611,60 @@ def _run_stream(streamer: GRBLStreamer, path: str, st: GRBLStatus, cfg: StatusCo
             while not stream_done.is_set():
                 if select.select([sys.stdin], [], [], 0.05)[0]:
                     key = sys.stdin.read(1)
-                    if key == "!":
-                        streamer.feed_hold()
-                        _print_above("  [feed hold]", status_line())
-                    elif key == "~":
-                        streamer.cycle_start()
-                        _print_above("  [cycle start]", status_line())
-                    elif key == "+":
-                        streamer.feed_override_plus10()
-                        _print_above("  [feed +10%]", status_line())
-                    elif key == "-":
-                        streamer.feed_override_minus10()
-                        _print_above("  [feed -10%]", status_line())
-                    elif key == "0":
-                        streamer.feed_override_reset()
-                        _print_above("  [feed reset 100%]", status_line())
-                    elif key == "q":
+                    aid = keymap.get(key)
+                    if aid is None:
+                        continue
+                    if aid == "stop":
+                        stopped = True
                         streamer.stop_stream()
                         break
+                    getattr(streamer, _ACTION_METHOD[aid])()
+                    _print_above(f"  [{_ACTION_DESC[aid]}]", status_line())
         except KeyboardInterrupt:
+            stopped = True
             streamer.stop_stream()
+        except Exception as e:
+            # Never abandon a running stream on a control-path error — stop it,
+            # then fall through to the wait + cancel cleanup below.
+            stopped = True
+            streamer.stop_stream()
+            _print_above(f"  input error: {e}", "")
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     stream_done.wait()
+    completed = not errored and not stopped
+    name = os.path.basename(path)
+    if errored:
+        msg = f"Stream halted on error: {name} ({sent}/{total} lines sent)"
+    elif stopped:
+        msg = f"Stream stopped: {name} ({sent}/{total} lines sent)"
+    else:
+        msg = f"Stream complete: {name} ({total} lines)"
     with _stdout_lock:
-        sys.stdout.write("\nDone.\n")
+        sys.stdout.write(f"\n{msg}\n")
         sys.stdout.flush()
+
+    # A stopped/errored stream leaves GRBL still running its buffered motion.
+    # Abort and flush so the machine halts and the next run starts clean — but
+    # only if we actually sent something; otherwise there's nothing to halt and
+    # a needless soft-reset would wipe overrides / alarm a homing machine.
+    if not completed and sent > 0:
+        greeting = streamer.cancel()
+        with _stdout_lock:
+            sys.stdout.write("Machine reset to halt motion and flush buffers.\n")
+            if greeting:
+                sys.stdout.write(_grbl(greeting) + "\n")
+            sys.stdout.flush()
+
+    return completed
+
+
+def _connect_message(greeting: str, streamer: GRBLStreamer) -> str:
+    """GRBL's own words to show on connect: the welcome string if it arrived,
+    otherwise a status report from '?' (this board doesn't reset on serial open).
+    Empty if GRBL doesn't respond at all."""
+    return greeting or streamer.query_status()
 
 
 def _apply_units(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
@@ -556,27 +672,133 @@ def _apply_units(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
     streamer.send_command(f"$13={cfg.grbl_inch}")
 
 
-def _run_config(cfg: StatusConfig, arg: str, streamer: GRBLStreamer) -> None:
-    """View or set gcgo display config (status fields, poll rate, units)."""
+def _key_conflict(cfg: StatusConfig, aid: str, key: str) -> str | None:
+    """Return the id of another enabled action already bound to `key`, if any."""
+    for other, entry in cfg.keys.items():
+        if other != aid and entry["enabled"] and entry["key"] == key:
+            return other
+    return None
+
+
+def _config_keys(cfg: StatusConfig, parts: list[str]) -> None:
+    """Handle 'config keys ...': view or set streaming real-time key bindings."""
+    if not parts:
+        print("Streaming real-time keys:")
+        for aid, desc, _k, _e, _m in STREAM_ACTIONS:
+            entry = cfg.keys[aid]
+            state = "on " if entry["enabled"] else "off"
+            key = repr(entry["key"]) if entry["key"] else "(unbound)"
+            print(f"  [{state}] {aid:<14} {key:<10} {desc}")
+        print("Usage: config keys <action> <char>   bind key and enable")
+        print("       config keys <action> off       disable")
+        return
+
+    aid = parts[0].lower()
+    if aid not in cfg.keys:
+        print(f"Unknown action: {aid!r}. Run 'config keys' to list them.")
+        return
+
+    if len(parts) < 2:
+        entry = cfg.keys[aid]
+        print(f"  {aid}: key={entry['key']!r} enabled={entry['enabled']}")
+        return
+
+    val = parts[1]
+    low = val.lower()
+
+    if low in ("off", "disable", "none"):
+        cfg.keys[aid]["enabled"] = False
+        cfg.save(_CONFIG_FILE)
+        print(f"  {aid} disabled")
+        return
+
+    if low in ("on", "enable"):
+        key = cfg.keys[aid]["key"]
+        if not key:
+            print(f"  {aid} has no key bound. Use: config keys {aid} <char>")
+            return
+        conflict = _key_conflict(cfg, aid, key)
+        if conflict:
+            print(f"Key {key!r} already bound to {conflict!r}. Disable it first.")
+            return
+        cfg.keys[aid]["enabled"] = True
+        cfg.save(_CONFIG_FILE)
+        print(f"  {aid} enabled (key={key!r})")
+        return
+
+    if len(val) != 1:
+        print(f"Key must be a single character: {val!r}")
+        return
+
+    conflict = _key_conflict(cfg, aid, val)
+    if conflict:
+        print(f"Key {val!r} already bound to {conflict!r}. Disable it first.")
+        return
+
+    cfg.keys[aid]["key"] = val
+    cfg.keys[aid]["enabled"] = True
+    cfg.save(_CONFIG_FILE)
+    print(f"  {aid} -> {val!r} (enabled)")
+
+
+def _config_fields(cfg: StatusConfig, parts: list[str]) -> None:
+    """Handle 'config fields ...': view or set status-line fields."""
     valid = {key for key, _, _ in StatusConfig.FIELDS}
-    parts = arg.split()
 
     if not parts:
-        print("Streaming status config:")
+        print("Status fields:")
         for key, desc, _ in StatusConfig.FIELDS:
             state = "on " if cfg.show[key] else "off"
             print(f"  [{state}] {key:<11} {desc}")
-        rate = f"{cfg.rate}s" if cfg.rate > 0 else "off"
-        print(f"        rate        status query rate ({rate})")
-        print(f"        units       report units / $13 ({cfg.units})")
-        print("Usage: config <field> [on|off]   (omit on/off to toggle)")
-        print("       config rate <seconds>     (0 disables polling)")
-        print("       config units <mm|inch>")
+        print("Usage: config fields <name> [on|off]   (omit on/off to toggle)")
         return
 
     key = parts[0].lower()
+    if key not in valid:
+        print(f"Unknown field: {key!r}. Valid: {', '.join(sorted(valid))}")
+        return
 
-    if key == "rate":
+    if len(parts) > 1:
+        cfg.show[key] = parts[1].lower() in ("on", "1", "true", "yes")
+    else:
+        cfg.show[key] = not cfg.show[key]
+
+    cfg.save(_CONFIG_FILE)
+    print(f"  {key} = {'on' if cfg.show[key] else 'off'}")
+
+
+def _run_config(cfg: StatusConfig, arg: str, streamer: GRBLStreamer) -> None:
+    """View or dispatch gcgo config subsections: fields, rate, units, keys."""
+    parts = arg.split()
+
+    if not parts:
+        on_fields = sum(1 for v in cfg.show.values() if v)
+        rate = f"{cfg.rate}s" if cfg.rate > 0 else "off"
+        bound = "  ".join(
+            f"[{cfg.keys[aid]['key']}] {aid}"
+            for aid, *_ in STREAM_ACTIONS
+            if cfg.keys[aid]["enabled"] and cfg.keys[aid]["key"]
+        )
+        print("Config:")
+        print(f"  fields   {on_fields}/{len(cfg.show)} shown   (config fields)")
+        print(f"  rate     {rate}            (config rate <seconds>)")
+        print(f"  units    {cfg.units} ($13={cfg.grbl_inch})       (config units <mm|inch>)")
+        print(f"  after    {cfg.after}          (config after <keep|clear>)")
+        print(f"  keys     {bound or '(none bound)'}")
+        print("           (config keys)")
+        return
+
+    section = parts[0].lower()
+
+    if section == "fields":
+        _config_fields(cfg, parts[1:])
+        return
+
+    if section == "keys":
+        _config_keys(cfg, parts[1:])
+        return
+
+    if section == "rate":
         if len(parts) > 1:
             try:
                 cfg.rate = max(0.0, float(parts[1]))
@@ -588,7 +810,7 @@ def _run_config(cfg: StatusConfig, arg: str, streamer: GRBLStreamer) -> None:
         print(f"  rate = {rate}")
         return
 
-    if key == "units":
+    if section == "units":
         if len(parts) > 1:
             val = parts[1].lower()
             if val in ("mm", "metric"):
@@ -603,17 +825,18 @@ def _run_config(cfg: StatusConfig, arg: str, streamer: GRBLStreamer) -> None:
         print(f"  units = {cfg.units}  ($13={cfg.grbl_inch})")
         return
 
-    if key not in valid:
-        print(f"Unknown field: {key!r}. Valid: {', '.join(sorted(valid))}, rate, units")
+    if section == "after":
+        if len(parts) > 1:
+            val = parts[1].lower()
+            if val not in ("keep", "clear"):
+                print(f"Invalid value: {parts[1]!r} (use keep or clear)")
+                return
+            cfg.after = val
+            cfg.save(_CONFIG_FILE)
+        print(f"  after = {cfg.after}")
         return
 
-    if len(parts) > 1:
-        cfg.show[key] = parts[1].lower() in ("on", "1", "true", "yes")
-    else:
-        cfg.show[key] = not cfg.show[key]
-
-    cfg.save(_CONFIG_FILE)
-    print(f"  {key} = {'on' if cfg.show[key] else 'off'}")
+    print(f"Unknown config section: {section!r}. Valid: fields, rate, units, after, keys")
 
 
 def main():
@@ -654,22 +877,24 @@ def main():
     print(f"Connecting to {port} at {args.baud} baud...")
     try:
         greeting = streamer.connect()
-        print(f"GRBL: {greeting}")
+        msg = _connect_message(greeting, streamer)
+        print(_grbl(msg) if msg else "  (no response from GRBL — check baud/port)")
+        # gcgo owns GRBL's $13 so report units always match its display labels.
+        _apply_units(streamer, field_config)
+        print(f"Report units: {field_config.units} ($13={field_config.grbl_inch})")
     except Exception as e:
         print(f"Connection failed: {e}")
+        streamer.disconnect()
         sys.exit(1)
-
-    # gcgo owns GRBL's $13 so report units always match its display labels.
-    _apply_units(streamer, field_config)
-    print(f"Report units: {field_config.units} ($13={field_config.grbl_inch})")
 
     _install_completer()
     print(HELP)
 
     try:
         while True:
+            prompt = f"gcgo [{os.path.basename(loaded_file)}]> " if loaded_file else "gcgo [no file]> "
             try:
-                raw = input("gcgo> ").strip()
+                raw = input(prompt).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -684,80 +909,97 @@ def main():
             if cmd in ("quit", "exit"):
                 break
 
-            elif cmd == "help":
-                print(HELP)
+            # One bad command (parse error, transient serial hiccup) must not
+            # end the session — report it and return to the prompt.
+            try:
+                if cmd == "help":
+                    print(HELP)
 
-            elif cmd == "ports":
-                for p in list_ports():
-                    print(f"  {p}")
+                elif cmd == "ports":
+                    for p in list_ports():
+                        print(f"  {p}")
 
-            elif cmd == "load":
-                if not arg:
-                    print("Usage: load <file>")
+                elif cmd == "load":
+                    if not arg:
+                        print("Usage: load <file>")
+                    else:
+                        path = os.path.expanduser(arg)
+                        try:
+                            n = len(load_gcode(path))
+                        except (OSError, ValueError) as e:
+                            print(f"  {e}")
+                        else:
+                            loaded_file = path
+                            print(f"Loaded {os.path.basename(path)} ({n} lines)")
+
+                elif cmd == "ls":
+                    target = os.path.expanduser(arg) if arg else "."
+                    try:
+                        for name in sorted(os.listdir(target)):
+                            suffix = "/" if os.path.isdir(os.path.join(target, name)) else ""
+                            print(f"  {name}{suffix}")
+                    except OSError as e:
+                        print(f"  {e}")
+
+                elif cmd == "cd":
+                    try:
+                        os.chdir(os.path.expanduser(arg) if arg else Path.home())
+                        print(f"  {os.getcwd()}")
+                    except OSError as e:
+                        print(f"  {e}")
+
+                elif cmd == "mdi":
+                    _run_mdi(streamer, field_config)
+
+                elif cmd == "settings":
+                    _print_settings(streamer)
+
+                elif cmd == "params":
+                    _print_params(streamer)
+
+                elif cmd == "unlock":
+                    streamer.send_command_verbose("$X", on_line=lambda l: print(_grbl(l)))
+
+                elif cmd == "home":
+                    print("Homing...")
+                    streamer.send_command_verbose("$H", on_line=lambda l: print(_grbl(l)), read_timeout=120)
+
+                elif cmd == "check":
+                    streamer.send_command_verbose("$C", on_line=lambda l: print(_grbl(l)))
+
+                elif cmd == "run":
+                    if not loaded_file:
+                        print("No file loaded. Use: load <file>")
+                    else:
+                        completed = _run_stream(streamer, loaded_file, grbl_status, field_config)
+                        if completed and field_config.after == "clear":
+                            loaded_file = None
+                            print("File unloaded.")
+
+                elif cmd == "config":
+                    _run_config(field_config, arg, streamer)
+
+                elif cmd == "reset":
+                    greeting = streamer.soft_reset()
+                    if greeting:
+                        print(_grbl(greeting))
+
+                elif cmd == "status":
+                    raw = streamer.query_status()
+                    grbl_status.update(raw)
+                    _print_status_detail(grbl_status, field_config)
+
                 else:
-                    loaded_file = os.path.expanduser(arg)
-                    print(f"Loaded: {loaded_file}")
+                    print(f"Unknown command: {cmd!r}. Type 'help' for available commands or 'mdi' to send gcode directly.")
 
-            elif cmd == "ls":
-                target = os.path.expanduser(arg) if arg else "."
-                try:
-                    for name in sorted(os.listdir(target)):
-                        suffix = "/" if os.path.isdir(os.path.join(target, name)) else ""
-                        print(f"  {name}{suffix}")
-                except OSError as e:
-                    print(f"  {e}")
-
-            elif cmd == "cd":
-                try:
-                    os.chdir(os.path.expanduser(arg) if arg else Path.home())
-                    print(f"  {os.getcwd()}")
-                except OSError as e:
-                    print(f"  {e}")
-
-            elif cmd == "mdi":
-                _run_mdi(streamer, field_config)
-
-            elif cmd == "settings":
-                _print_settings(streamer)
-
-            elif cmd == "params":
-                _print_params(streamer)
-
-            elif cmd == "unlock":
-                streamer.send_command_verbose("$X", on_line=lambda l: print(f"  {l}"))
-
-            elif cmd == "home":
-                print("Homing...")
-                streamer.send_command_verbose("$H", on_line=lambda l: print(f"  {l}"), read_timeout=120)
-
-            elif cmd == "check":
-                streamer.send_command_verbose("$C", on_line=lambda l: print(f"  {l}"))
-
-            elif cmd == "run":
-                if not loaded_file:
-                    print("No file loaded. Use: load <file>")
-                else:
-                    _run_stream(streamer, loaded_file, grbl_status, field_config)
-
-            elif cmd == "config":
-                _run_config(field_config, arg, streamer)
-
-            elif cmd == "fo":
-                streamer.feed_override_reset()
-                print("Feed override reset to 100%.")
-
-            elif cmd == "reset":
-                greeting = streamer.soft_reset()
-                if greeting:
-                    print(f"  {greeting}")
-
-            elif cmd == "status":
-                raw = streamer.query_status()
-                grbl_status.update(raw)
-                _print_status_detail(grbl_status, field_config)
-
-            else:
-                print(f"Unknown command: {cmd!r}. Type 'help' for available commands or 'mdi' to send gcode directly.")
+            except KeyboardInterrupt:
+                # Abort the current command and return to the prompt (rather
+                # than crashing out of a blocking read like 'home'). Drop any
+                # partial response so it can't desync the next command.
+                print("^C")
+                streamer.flush_input()
+            except Exception as e:
+                print(f"Error: {e}")
 
     finally:
         streamer.disconnect()

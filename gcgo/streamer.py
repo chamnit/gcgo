@@ -8,7 +8,6 @@ import serial
 
 RX_BUFFER_SIZE = 127
 GRBL_BAUD = 115200
-STATUS_POLL_INTERVAL = 0.5
 
 
 class GRBLStatus:
@@ -47,45 +46,49 @@ class GRBLStatus:
         return (self._wco[0], self._wco[1], self._wco[2])
 
     def update(self, raw: str) -> bool:
-        """Parse a GRBL status string and update retained state."""
+        """Parse a GRBL status string and update retained state.
+
+        Returns False (leaving prior state intact) if the report is malformed,
+        e.g. truncated by serial noise — a bad frame must never raise, since
+        that would abort a running stream.
+        """
         if not (raw.startswith("<") and raw.endswith(">")):
             return False
         parts = raw[1:-1].split("|")
-        if not parts:
+        if not parts or not parts[0]:
             return False
 
-        self.state = parts[0]
-        has_pn = False
-
+        fields = {}
         for part in parts[1:]:
             key, _, val = part.partition(":")
-            if key == "MPos":
-                self._mpos = [float(v) for v in val.split(",")]
-            elif key == "WPos":
-                # derive MPos from WPos + retained WCO
-                wpos = [float(v) for v in val.split(",")]
-                self._mpos = [wpos[i] + self._wco[i] for i in range(3)]
-            elif key == "WCO":
-                self._wco = [float(v) for v in val.split(",")]
-            elif key == "FS":
-                fs = val.split(",")
+            fields[key] = val
+
+        try:
+            # WCO first, so a WPos report can be converted with the current offset
+            if "WCO" in fields:
+                self._wco = [float(v) for v in fields["WCO"].split(",")]
+            if "MPos" in fields:
+                self._mpos = [float(v) for v in fields["MPos"].split(",")]
+            elif "WPos" in fields:
+                wpos = [float(v) for v in fields["WPos"].split(",")]
+                self._mpos = [wpos[i] + self._wco[i] for i in range(len(wpos))]
+            if "FS" in fields:
+                fs = fields["FS"].split(",")
                 self.feed = float(fs[0])
                 self.spindle = float(fs[1]) if len(fs) > 1 else 0.0
-            elif key == "F":
-                self.feed = float(val)
-            elif key == "Pn":
-                self.pins = val
-                has_pn = True
-            elif key == "Ov":
-                ov = val.split(",")
+            elif "F" in fields:
+                self.feed = float(fields["F"])
+            if "Ov" in fields:
+                ov = fields["Ov"].split(",")
                 if len(ov) >= 3:
                     self.feed_ov = int(ov[0])
                     self.rapid_ov = int(ov[1])
                     self.spindle_ov = int(ov[2])
+        except (ValueError, IndexError):
+            return False
 
-        if not has_pn:
-            self.pins = ""
-
+        self.pins = fields.get("Pn", "")
+        self.state = parts[0]
         return True
 
 
@@ -117,6 +120,11 @@ class GRBLStreamer:
     def disconnect(self):
         if self._serial and self._serial.is_open:
             self._serial.close()
+
+    def flush_input(self) -> None:
+        """Drop any pending bytes in the serial input buffer."""
+        if self._serial and self._serial.is_open:
+            self._serial.reset_input_buffer()
 
     @property
     def connected(self) -> bool:
@@ -203,6 +211,39 @@ class GRBLStreamer:
     def feed_override_minus1(self) -> None:
         self._send_realtime(b"\x94")
 
+    def rapid_override_full(self) -> None:
+        self._send_realtime(b"\x95")
+
+    def rapid_override_half(self) -> None:
+        self._send_realtime(b"\x96")
+
+    def rapid_override_quarter(self) -> None:
+        self._send_realtime(b"\x97")
+
+    def spindle_override_reset(self) -> None:
+        self._send_realtime(b"\x99")
+
+    def spindle_override_plus10(self) -> None:
+        self._send_realtime(b"\x9a")
+
+    def spindle_override_minus10(self) -> None:
+        self._send_realtime(b"\x9b")
+
+    def spindle_override_plus1(self) -> None:
+        self._send_realtime(b"\x9c")
+
+    def spindle_override_minus1(self) -> None:
+        self._send_realtime(b"\x9d")
+
+    def spindle_stop_toggle(self) -> None:
+        self._send_realtime(b"\x9e")
+
+    def flood_toggle(self) -> None:
+        self._send_realtime(b"\xa0")
+
+    def mist_toggle(self) -> None:
+        self._send_realtime(b"\xa1")
+
     # --- soft-reset ---
 
     def soft_reset(self) -> str:
@@ -231,9 +272,7 @@ class GRBLStreamer:
         status_interval:                 seconds between automatic '?' status polls;
                                          0 disables polling
         """
-        lines = Path(path).read_text().splitlines()
-        lines = [_strip_comment(l) for l in lines]
-        lines = [l for l in lines if l]
+        lines = load_gcode(path)
         total = len(lines)
 
         buf_counts: list[int] = []
@@ -242,6 +281,7 @@ class GRBLStreamer:
         buf_used = 0
 
         self._stop_event.clear()
+        self._serial.reset_input_buffer()  # drop any stale bytes from a prior run
 
         poll_stop = threading.Event()
         if status_interval > 0:
@@ -269,13 +309,21 @@ class GRBLStreamer:
                 # read until we get the terminal ok/error for this gcode line;
                 # any other lines (status reports, messages, alarms) are routed
                 # to on_message and do not count against the buffer tracker.
+                # The stop check lets us bail even if GRBL goes unresponsive,
+                # and empty reads (serial timeouts) are skipped, not displayed.
+                resp = ""
                 with self._lock:
-                    while True:
+                    while not self._stop_event.is_set():
                         resp = self._readline()
+                        if not resp:
+                            continue
                         if resp.startswith(("ok", "error")):
                             break
                         if on_message:
                             on_message(resp)
+
+                if not resp.startswith(("ok", "error")):
+                    break  # stopped while waiting for a response
 
                 buf_used -= buf_counts.pop(0)
                 recv_idx += 1
@@ -288,6 +336,37 @@ class GRBLStreamer:
 
     def stop_stream(self) -> None:
         self._stop_event.set()
+
+    def cancel(self) -> str:
+        """Abort an in-progress job.
+
+        Stopping the stream only stops *sending* — GRBL keeps running the lines
+        already in its serial RX and planner buffers. To truly halt, feed-hold to
+        decelerate, then soft-reset to abort and flush GRBL's buffers. soft_reset
+        also drains the serial input so stale 'ok's don't corrupt the next run.
+        Returns the reset greeting.
+        """
+        self._send_realtime(b"!")  # feed hold (decelerate)
+        time.sleep(0.3)
+        return self.soft_reset()   # 0x18: abort + flush + drain input
+
+
+def load_gcode(path: str | Path) -> list[str]:
+    """Read a gcode file and return the cleaned, non-empty lines as streamed.
+
+    Raises ValueError if any line (plus its newline) can't fit in GRBL's RX
+    buffer, which would otherwise deadlock the character-counting stream loop.
+    """
+    raw = Path(path).read_text().splitlines()
+    lines = [_strip_comment(l) for l in raw]
+    lines = [l for l in lines if l]
+    for n, l in enumerate(lines, 1):
+        if len(l) + 1 > RX_BUFFER_SIZE:
+            raise ValueError(
+                f"line {n} is {len(l) + 1} chars, exceeds the "
+                f"{RX_BUFFER_SIZE}-byte GRBL buffer: {l[:40]}..."
+            )
+    return lines
 
 
 def _strip_comment(line: str) -> str:
