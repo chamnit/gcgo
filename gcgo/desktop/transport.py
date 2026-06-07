@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import serial
+from serial.tools import list_ports as _list_ports
 
 GRBL_BAUD = 115200
+
+
+def list_ports() -> list[str]:
+    """Names of available serial ports."""
+    return [p.device for p in _list_ports.comports()]
 
 
 class PySerialTransport:
