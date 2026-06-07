@@ -518,6 +518,10 @@ def run(streamer: Streamer, cfg: StatusConfig) -> None:
         # gcgo owns GRBL's $13 so report units always match its display labels.
         _apply_units(streamer, cfg)
         print(f"Report units: {cfg.units} ($13={cfg.grbl_inch})")
+    except KeyboardInterrupt:
+        print("\nConnection aborted.")
+        streamer.disconnect()
+        sys.exit(1)
     except Exception as e:
         print(f"Connection failed: {e}")
         streamer.disconnect()
