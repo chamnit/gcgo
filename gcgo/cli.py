@@ -10,10 +10,12 @@ import select
 import shutil
 import sys
 import termios
-import threading
+import time
 import tty
 
 from gcgo.core.config import StatusConfig
+from gcgo.core.gcode import load_gcode
+from gcgo.core.protocol import RUNNING, Streamer
 from gcgo.core.status import GRBLStatus
 from gcgo.core.tables import (
     ACTION_DESC as _ACTION_DESC,
@@ -24,7 +26,6 @@ from gcgo.core.tables import (
     STREAM_ACTIONS,
 )
 from gcgo.desktop.transport import PySerialTransport
-from gcgo.streamer import GRBLStreamer, load_gcode
 
 
 def _config_dir() -> Path:
@@ -93,9 +94,6 @@ def _install_completer() -> None:
         readline.parse_and_bind("tab: complete")
 
 
-_stdout_lock = threading.Lock()
-
-
 def _term_width() -> int:
     return shutil.get_terminal_size().columns
 
@@ -103,15 +101,13 @@ def _term_width() -> int:
 def _print_above(text: str, status: str) -> None:
     """Print a scrolling line above the persistent status line."""
     w = _term_width()
-    with _stdout_lock:
-        sys.stdout.write(f"\r{' ' * w}\r{text}\n{status}")
-        sys.stdout.flush()
+    sys.stdout.write(f"\r{' ' * w}\r{text}\n{status}")
+    sys.stdout.flush()
 
 
 def _redraw_status(status: str) -> None:
-    with _stdout_lock:
-        sys.stdout.write(f"\r{status}")
-        sys.stdout.flush()
+    sys.stdout.write(f"\r{status}")
+    sys.stdout.flush()
 
 
 def _grbl(line: str) -> str:
@@ -207,7 +203,7 @@ Tab completes commands and file paths (load/cd/ls).
 """
 
 
-def _print_settings(streamer: GRBLStreamer) -> None:
+def _print_settings(streamer: Streamer) -> None:
     raw_lines: list[str] = []
     streamer.send_command_verbose("$$", on_line=raw_lines.append)
 
@@ -238,7 +234,7 @@ def _print_settings(streamer: GRBLStreamer) -> None:
     print()
 
 
-def _print_params(streamer: GRBLStreamer) -> None:
+def _print_params(streamer: Streamer) -> None:
     raw_lines: list[str] = []
     streamer.send_command_verbose("$#", on_line=raw_lines.append)
 
@@ -290,7 +286,7 @@ def list_ports() -> list[str]:
     return [p.device for p in list_ports.comports()]
 
 
-def _run_mdi(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
+def _run_mdi(streamer: Streamer, cfg: StatusConfig) -> None:
     """MDI mode: send gcode commands one at a time. Exit with 'exit' or Ctrl-C."""
     print("MDI mode — type gcode commands, 'exit' to return.")
     saved_completer = readline.get_completer()
@@ -301,7 +297,7 @@ def _run_mdi(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
         readline.set_completer(saved_completer)
 
 
-def _mdi_loop(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
+def _mdi_loop(streamer: Streamer, cfg: StatusConfig) -> None:
     while True:
         try:
             line = input("mdi> ").strip()
@@ -332,25 +328,31 @@ def _mdi_loop(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
                 print(f"  [gcgo] $13 re-asserted to {cfg.grbl_inch} (units={cfg.units})")
 
 
-def _run_stream(streamer: GRBLStreamer, path: str, st: GRBLStatus, cfg: StatusConfig) -> bool:
-    """Stream a file and read interactive keypresses until done.
+def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
+    """Stream a file with a live status line and interactive real-time keys,
+    driving the non-blocking pump in one cooperative loop (no threads).
 
     Returns True only if the stream completed cleanly (no error, not stopped).
     """
-    progress = ""
-    sent = total = 0
-    errored = False
-    stopped = False
+    try:
+        lines = load_gcode(path)
+    except (OSError, ValueError) as e:
+        print(f"  {e}")
+        return False
+
+    progress = [""]
 
     def status_line() -> str:
-        return _format_status_line(st, progress, cfg)
+        return _format_status_line(streamer.status, progress[0], cfg)
+
+    def on_progress(s, t, line):
+        progress[0] = f"{s}/{t} ({s * 100 // t}%)"
+        _print_above(f"  >> {line}", status_line())
 
     def on_response(n, resp):
-        nonlocal errored
         if not resp.startswith("ok"):
             desc = ""
             if resp.startswith("error:"):
-                errored = True
                 try:
                     code = int(resp.split(":")[1])
                     desc = f"  — {_GRBL_ERRORS[code]}" if code in _GRBL_ERRORS else ""
@@ -358,108 +360,84 @@ def _run_stream(streamer: GRBLStreamer, path: str, st: GRBLStatus, cfg: StatusCo
                     pass
             _print_above(f'  [{n}] "{resp}"{desc}', status_line())
 
-    def on_progress(s, t, line):
-        nonlocal progress, sent, total
-        progress = f"{s}/{t} ({s * 100 // t}%)"
-        sent, total = s, t
-        _print_above(f"  >> {line}", status_line())
-
     def on_message(msg):
         if msg.startswith("<"):
-            st.update(msg)
-            _redraw_status(status_line())
+            _redraw_status(status_line())  # pump already parsed it into status
         else:
             _print_above(_grbl(msg), status_line())
 
-    stream_done = threading.Event()
-
-    def _stream():
-        nonlocal errored
-        try:
-            streamer.stream_file(
-                path,
-                on_response=on_response,
-                on_progress=on_progress,
-                on_message=on_message,
-                status_interval=cfg.rate,
-            )
-        except Exception as e:
-            errored = True
-            _print_above(f"  Stream error: {e}", "")
-        finally:
-            stream_done.set()
-
-    threading.Thread(target=_stream, daemon=True).start()
+    streamer.begin(lines, on_progress=on_progress, on_response=on_response,
+                   on_message=on_message, status_interval=cfg.rate)
 
     keymap = _build_keymap(cfg)
     sys.stdout.write(_stream_keys_banner(cfg))
     sys.stdout.flush()
 
-    if sys.stdin.isatty():
+    interactive = sys.stdin.isatty()
+    fd = old_settings = None
+    if interactive:
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            while not stream_done.is_set():
-                if select.select([sys.stdin], [], [], 0.05)[0]:
-                    key = sys.stdin.read(1)
-                    aid = keymap.get(key)
-                    if aid is None:
-                        continue
-                    if aid == "stop":
-                        stopped = True
-                        streamer.stop_stream()
-                        break
+        tty.setcbreak(fd)
+    err = None
+    try:
+        while streamer.pump() == RUNNING:
+            if interactive and select.select([sys.stdin], [], [], 0)[0]:
+                key = sys.stdin.read(1)
+                aid = keymap.get(key)
+                if aid == "stop":
+                    streamer.request_stop()
+                elif aid is not None:
                     getattr(streamer, _ACTION_METHOD[aid])()
                     _print_above(f"  [{_ACTION_DESC[aid]}]", status_line())
-        except KeyboardInterrupt:
-            stopped = True
-            streamer.stop_stream()
-        except Exception as e:
-            # Never abandon a running stream on a control-path error — stop it,
-            # then fall through to the wait + cancel cleanup below.
-            stopped = True
-            streamer.stop_stream()
-            _print_above(f"  input error: {e}", "")
-        finally:
+            time.sleep(0.003)
+    except KeyboardInterrupt:
+        streamer.request_stop()
+    except Exception as e:
+        # Never abandon a running stream on a control-path error — stop it,
+        # then fall through to the cancel cleanup below.
+        err = e
+        streamer.request_stop()
+    finally:
+        if interactive:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-    stream_done.wait()
-    completed = not errored and not stopped
+    state, sent, total = streamer.state, streamer.sent, streamer.total
     name = os.path.basename(path)
-    if errored:
+    if err is not None:
+        _print_above(f"  stream error: {err}", "")
+    if state == "error":
         msg = f"Stream halted on error: {name} ({sent}/{total} lines sent)"
-    elif stopped:
+    elif state == "stopped":
         msg = f"Stream stopped: {name} ({sent}/{total} lines sent)"
     else:
         msg = f"Stream complete: {name} ({total} lines)"
-    with _stdout_lock:
-        sys.stdout.write(f"\n{msg}\n")
-        sys.stdout.flush()
+    sys.stdout.write(f"\n{msg}\n")
+    sys.stdout.flush()
 
     # A stopped/errored stream leaves GRBL still running its buffered motion.
     # Abort and flush so the machine halts and the next run starts clean — but
     # only if we actually sent something; otherwise there's nothing to halt and
     # a needless soft-reset would wipe overrides / alarm a homing machine.
-    if not completed and sent > 0:
+    completed = state == "done"
+    if not completed and streamer.sent_any:
         greeting = streamer.cancel()
-        with _stdout_lock:
-            sys.stdout.write("Machine reset to halt motion and flush buffers.\n")
-            if greeting:
-                sys.stdout.write(_grbl(greeting) + "\n")
-            sys.stdout.flush()
+        sys.stdout.write("Machine reset to halt motion and flush buffers.\n")
+        if greeting:
+            sys.stdout.write(_grbl(greeting) + "\n")
+        sys.stdout.flush()
 
     return completed
 
 
-def _connect_message(greeting: str, streamer: GRBLStreamer) -> str:
+def _connect_message(greeting: str, streamer: Streamer) -> str:
     """GRBL's own words to show on connect: the welcome string if it arrived,
     otherwise a status report from '?' (this board doesn't reset on serial open).
     Empty if GRBL doesn't respond at all."""
     return greeting or streamer.query_status()
 
 
-def _apply_units(streamer: GRBLStreamer, cfg: StatusConfig) -> None:
+def _apply_units(streamer: Streamer, cfg: StatusConfig) -> None:
     """Write GRBL's $13 to match the configured display units."""
     streamer.send_command(f"$13={cfg.grbl_inch}")
 
@@ -559,7 +537,7 @@ def _config_fields(cfg: StatusConfig, parts: list[str]) -> None:
     print(f"  {key} = {'on' if cfg.show[key] else 'off'}")
 
 
-def _run_config(cfg: StatusConfig, arg: str, streamer: GRBLStreamer) -> None:
+def _run_config(cfg: StatusConfig, arg: str, streamer: Streamer) -> None:
     """View or dispatch gcgo config subsections: fields, rate, units, keys."""
     parts = arg.split()
 
@@ -661,7 +639,6 @@ def main():
                 sys.exit(1)
 
     loaded_file: str | None = None
-    grbl_status = GRBLStatus()
     field_config = StatusConfig()
     field_config.load(_CONFIG_FILE)
 
@@ -671,7 +648,8 @@ def main():
     except Exception as e:
         print(f"Connection failed: {e}")
         sys.exit(1)
-    streamer = GRBLStreamer(transport)
+    streamer = Streamer(transport)
+    grbl_status = streamer.status  # single retained status, updated by the pump
 
     try:
         greeting = streamer.connect()
@@ -769,7 +747,7 @@ def main():
                     if not loaded_file:
                         print("No file loaded. Use: load <file>")
                     else:
-                        completed = _run_stream(streamer, loaded_file, grbl_status, field_config)
+                        completed = _run_stream(streamer, loaded_file, field_config)
                         if completed and field_config.after == "clear":
                             loaded_file = None
                             print("File unloaded.")
