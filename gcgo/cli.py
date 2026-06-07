@@ -23,6 +23,7 @@ from gcgo.core.tables import (
     PARAM_NAMES as _PARAM_NAMES,
     STREAM_ACTIONS,
 )
+from gcgo.desktop.transport import PySerialTransport
 from gcgo.streamer import GRBLStreamer, load_gcode
 
 
@@ -659,13 +660,19 @@ def main():
                 print("Invalid selection.")
                 sys.exit(1)
 
-    streamer = GRBLStreamer(port, args.baud)
     loaded_file: str | None = None
     grbl_status = GRBLStatus()
     field_config = StatusConfig()
     field_config.load(_CONFIG_FILE)
 
     print(f"Connecting to {port} at {args.baud} baud...")
+    try:
+        transport = PySerialTransport(port, args.baud)
+    except Exception as e:
+        print(f"Connection failed: {e}")
+        sys.exit(1)
+    streamer = GRBLStreamer(transport)
+
     try:
         greeting = streamer.connect()
         msg = _connect_message(greeting, streamer)

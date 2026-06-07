@@ -1,60 +1,77 @@
-"""GRBL serial streamer using the buffer-fill (character-counting) protocol."""
+"""GRBL serial streamer using the buffer-fill (character-counting) protocol.
+
+I/O goes through an injected byte-level Transport (see gcgo/ports/base.py), so
+this layer carries no platform serial dependency; line assembly is done here.
+"""
 
 import threading
 import time
 from pathlib import Path
-
-import serial
 
 RX_BUFFER_SIZE = 127
 GRBL_BAUD = 115200
 
 
 class GRBLStreamer:
-    def __init__(self, port: str, baud: int = GRBL_BAUD, timeout: float = 2.0):
-        self.port = port
-        self.baud = baud
-        self.timeout = timeout
-        self._serial: serial.Serial | None = None
+    def __init__(self, transport, timeout: float = 2.0):
+        self._io = transport
+        self._timeout = timeout
+        self._io.set_timeout(timeout)
+        self._rx = bytearray()  # buffered, not-yet-newline-terminated input
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
     # --- connection ---
 
     def connect(self) -> str:
-        self._serial = serial.Serial(self.port, self.baud, timeout=self.timeout)
-        time.sleep(2)  # GRBL resets on serial open
+        time.sleep(2)  # GRBL resets on USB-serial open; let it boot
         return self._read_available()
 
     def _read_available(self) -> str:
-        """Read all lines currently in the RX buffer, return the last non-empty one."""
+        """Drain all currently-available input, return the last complete line."""
+        while self._io.any():
+            self._rx.extend(self._io.read(self._io.any()))
         last = ""
-        while self._serial.in_waiting:
-            line = self._serial.readline().decode(errors="replace").strip()
-            if line:
-                last = line
+        while True:
+            nl = self._rx.find(b"\n")
+            if nl < 0:
+                break
+            s = self._rx[:nl].decode("utf-8", "replace").strip()
+            del self._rx[:nl + 1]
+            if s:
+                last = s
         return last
 
     def disconnect(self):
-        if self._serial and self._serial.is_open:
-            self._serial.close()
+        self._io.close()
 
     def flush_input(self) -> None:
-        """Drop any pending bytes in the serial input buffer."""
-        if self._serial and self._serial.is_open:
-            self._serial.reset_input_buffer()
+        """Drop any pending input (transport buffer and our line buffer)."""
+        self._rx = bytearray()
+        if self._io.is_open():
+            self._io.reset_input()
 
     @property
     def connected(self) -> bool:
-        return bool(self._serial and self._serial.is_open)
+        return self._io.is_open()
 
     # --- low-level I/O ---
 
     def _send_raw(self, line: str) -> None:
-        self._serial.write((line.strip() + "\n").encode())
+        self._io.write((line.strip() + "\n").encode())
 
     def _readline(self) -> str:
-        return self._serial.readline().decode(errors="replace").strip()
+        """Assemble one line from the transport; "" on timeout (partial kept)."""
+        while True:
+            nl = self._rx.find(b"\n")
+            if nl >= 0:
+                s = self._rx[:nl].decode("utf-8", "replace").strip()
+                del self._rx[:nl + 1]
+                return s
+            chunk = self._io.read(64)
+            if not chunk:
+                return ""  # timeout, no complete line yet
+            self._rx.extend(chunk)
 
     # --- single command (blocking) ---
 
@@ -79,9 +96,8 @@ class GRBLStreamer:
         useful for long-running commands like homing ($H).
         """
         with self._lock:
-            old_timeout = self._serial.timeout
             if read_timeout is not None:
-                self._serial.timeout = read_timeout
+                self._io.set_timeout(read_timeout)
             try:
                 self._send_raw(cmd)
                 while True:
@@ -94,19 +110,19 @@ class GRBLStreamer:
                         break
             finally:
                 if read_timeout is not None:
-                    self._serial.timeout = old_timeout
+                    self._io.set_timeout(self._timeout)
 
     # --- status ---
 
     def query_status(self) -> str:
         with self._lock:
-            self._serial.write(b"?")
+            self._io.write(b"?")
             return self._readline()
 
     # --- real-time commands (bypass lock — safe per GRBL protocol) ---
 
     def _send_realtime(self, byte: bytes) -> None:
-        self._serial.write(byte)
+        self._io.write(byte)
 
     def feed_hold(self) -> None:
         self._send_realtime(b"!")
@@ -166,7 +182,7 @@ class GRBLStreamer:
 
     def soft_reset(self) -> str:
         with self._lock:
-            self._serial.write(b"\x18")
+            self._io.write(b"\x18")
             time.sleep(1)
             return self._read_available()
 
@@ -199,7 +215,7 @@ class GRBLStreamer:
         buf_used = 0
 
         self._stop_event.clear()
-        self._serial.reset_input_buffer()  # drop any stale bytes from a prior run
+        self.flush_input()  # drop any stale bytes from a prior run
 
         poll_stop = threading.Event()
         if status_interval > 0:
@@ -217,7 +233,7 @@ class GRBLStreamer:
                     if buf_used + len(line) > RX_BUFFER_SIZE:
                         break
                     with self._lock:
-                        self._serial.write(line.encode())
+                        self._io.write(line.encode())
                     buf_counts.append(len(line))
                     buf_used += len(line)
                     sent_idx += 1
