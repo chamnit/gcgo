@@ -4,8 +4,6 @@ Persisted as JSON. File I/O uses the builtin open() so it works on both CPython
 and MicroPython; the caller supplies the path.
 """
 
-from __future__ import annotations
-
 import json
 
 from gcgo.core.tables import STREAM_ACTIONS

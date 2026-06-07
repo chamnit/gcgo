@@ -3,8 +3,6 @@
 Pure data — no platform dependencies.
 """
 
-from __future__ import annotations
-
 # Streaming real-time key actions, in display order.
 # (id, description, default_key, default_enabled, streamer_method)
 # method is None for the special "stop streaming" action.

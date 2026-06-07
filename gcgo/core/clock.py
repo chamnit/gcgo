@@ -1,7 +1,5 @@
 """Monotonic millisecond clock, portable across CPython and MicroPython."""
 
-from __future__ import annotations
-
 import time
 
 if hasattr(time, "ticks_ms"):  # MicroPython

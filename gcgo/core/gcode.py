@@ -1,7 +1,5 @@
 """G-code loading and validation (portable; uses builtin open())."""
 
-from __future__ import annotations
-
 from gcgo.core.protocol import RX_BUFFER_SIZE
 
 

@@ -1,7 +1,5 @@
 """Retained GRBL status, accumulated across `?` status reports."""
 
-from __future__ import annotations
-
 
 class GRBLStatus:
     """Accumulates GRBL status fields across reports.

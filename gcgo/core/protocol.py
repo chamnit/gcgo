@@ -7,8 +7,6 @@ that same loop, so no locks are needed. Line assembly is done here on top of
 the transport's raw byte I/O.
 """
 
-from __future__ import annotations
-
 import time
 
 from gcgo.core.clock import diff_ms, now_ms
@@ -89,7 +87,7 @@ class Streamer:
         if nl < 0:
             return None
         s = self._rx[:nl].decode("utf-8", "replace").strip()
-        del self._rx[:nl + 1]
+        self._rx = self._rx[nl + 1:]  # reassign (MicroPython has no bytearray del-slice)
         return s
 
     def _readline(self) -> str:

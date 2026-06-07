@@ -6,8 +6,6 @@ does its own line assembly on top, so this stays a thin, portable primitive
 backed by pyserial on desktop and machine.UART on MicroPython.
 """
 
-from __future__ import annotations
-
 
 class Transport:
     """Byte-level serial transport to GRBL."""
