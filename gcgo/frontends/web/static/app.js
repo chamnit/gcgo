@@ -72,6 +72,7 @@ function upDir() {
 }
 function refresh() { send({ cmd: "files", dir: curdir }); }
 function runSel() { if (sel) send({ cmd: "run", file: sel }); }
+function dlSel() { if (sel) window.location = "/dl?file=" + encodeURIComponent(sel); }
 function delSel() {
   if (sel && confirm("Delete " + sel + "?")) { send({ cmd: "delete", file: sel }); sel = null; $("sel").textContent = "no file selected"; }
 }

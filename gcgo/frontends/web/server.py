@@ -281,6 +281,8 @@ class WebServer:
                 await self._serve_ws(reader, writer, hdrs)
             elif method == "POST":
                 await self._serve_upload(reader, writer, hdrs, path)
+            elif path.split("?", 1)[0] == "/dl":
+                await self._serve_download(writer, path)
             else:
                 await self._serve_http(writer, path)
         except (EOFError, OSError):
@@ -329,6 +331,38 @@ class WebServer:
                 % (code, "OK" if code == 200 else "ERR", len(body)))
         writer.write(head.encode() + body)
         await writer.drain()
+
+    async def _serve_download(self, writer, path):
+        """GET /dl?file=<rel> — stream a g-code file back as a download, in
+        bounded chunks (never read whole into RAM)."""
+        import os
+        rel = _safe_rel(_query(path).get("file", ""))
+        if not rel:
+            await self._http_text(writer, 400, "bad file")
+            return
+        full = self.gdir + "/" + rel
+        try:
+            size = os.stat(full)[6]
+            f = open(full, "rb")
+        except OSError:
+            await self._http_text(writer, 404, "not found")
+            return
+        name = rel.rsplit("/", 1)[-1]
+        head = ("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+                "Content-Length: %d\r\nContent-Disposition: attachment; filename=\"%s\"\r\n"
+                "Connection: close\r\n\r\n" % (size, name))
+        writer.write(head.encode())
+        buf = bytearray(1024)
+        mv = memoryview(buf)
+        try:
+            while True:
+                k = f.readinto(buf)
+                if not k:
+                    break
+                writer.write(mv[:k])
+                await writer.drain()
+        finally:
+            f.close()
 
     async def _serve_upload(self, reader, writer, hdrs, path):
         """POST /upload?name=<file>&dir=<subdir> with the raw file as the body.
