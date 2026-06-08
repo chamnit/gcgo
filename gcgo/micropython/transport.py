@@ -45,3 +45,15 @@ class UARTTransport:
 
     def close(self):
         self._uart.deinit()
+
+
+def hard_reset(pin_num, settle=2.0):
+    """Pulse an active-low reset line (via level shifter) to reboot the GRBL
+    board, then wait for it to come back up. Returns nothing."""
+    import time
+    from machine import Pin
+    p = Pin(pin_num, Pin.OUT, value=1)
+    p.value(0)
+    time.sleep_ms(20)
+    p.value(1)
+    time.sleep(settle)
