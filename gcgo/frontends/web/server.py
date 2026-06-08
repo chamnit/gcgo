@@ -166,7 +166,8 @@ class WebServer:
         frames = [wsproto.encode_text(json.dumps(o)) for o in self.pending]
         self.pending = []
         dead = []
-        for w in self.clients:
+        # snapshot: a client handler may add/remove itself across the awaits below
+        for w in list(self.clients):
             try:
                 for fr in frames:
                     w.write(fr)

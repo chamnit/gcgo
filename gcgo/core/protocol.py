@@ -241,6 +241,7 @@ class Streamer:
         Callbacks are invoked (with decoded text) only when set, so the MCU hot
         path stays allocation-free by leaving them None.
         """
+        self._close_file()   # defensive: never leak a prior file handle
         self._reset_stream()
         self.on_sent = on_sent
         self.on_response = on_response
