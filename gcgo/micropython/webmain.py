@@ -42,10 +42,22 @@ def connect_wifi(ssid, password, timeout=20):
 
 
 def start(ssid=None, password=None, uart_id=0, tx=16, rx=17, reset=18,
-          gdir="/gcode", http_port=80):
+          gdir="/gcode", http_port=80, sd=False):
+    """Bring up the web pendant.
+
+    sd: mount an SD card and serve g-code from it. Pass True for default SPI
+        pins, or a dict of mount_sd() kwargs (spi_id/sck/mosi/miso/cs/mount).
+        If no card/driver is present it falls back to `gdir` (flash).
+    """
     if ssid is None:
         import secrets  # a secrets.py with WIFI_SSID / WIFI_PASS on the board
         ssid, password = secrets.WIFI_SSID, secrets.WIFI_PASS
+
+    if sd:
+        from gcgo.micropython.sd import mount_sd
+        mounted = mount_sd(**(sd if isinstance(sd, dict) else {}))
+        if mounted:
+            gdir = mounted
 
     ip = connect_wifi(ssid, password)
     print("WiFi connected:", ip)

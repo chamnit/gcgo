@@ -281,7 +281,11 @@ class Streamer:
             self._src_end = rem
         if self._src_end >= SRC_CAP:
             return  # buffer full with no newline — line too long (caught below)
-        k = self._file.readinto(self._srcmv[self._src_end:])
+        try:
+            k = self._file.readinto(self._srcmv[self._src_end:])
+        except OSError:
+            self._state = ERROR  # storage read failed mid-stream (e.g. SD pulled)
+            return
         if not k:
             self._eof = True
         else:
