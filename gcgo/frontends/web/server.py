@@ -22,6 +22,75 @@ _CT = {"html": "text/html", "js": "application/javascript", "css": "text/css"}
 _GCODE_EXT = (".gcode", ".nc", ".g", ".gc", ".ngc")
 
 
+def _safe_rel(rel):
+    """Normalize a client-supplied path to a relative one that can't escape the
+    g-code dir. Returns "" for the root, or None if it tries to traverse up."""
+    if not rel:
+        return ""
+    parts = []
+    for p in rel.replace("\\", "/").split("/"):
+        if p in ("", "."):
+            continue
+        if p == "..":
+            return None
+        parts.append(p)
+    return "/".join(parts)
+
+
+def _basename(name):
+    """A bare, safe filename (no directories, no leading dot)."""
+    name = name.replace("\\", "/").split("/")[-1]
+    return "" if (not name or name.startswith(".")) else name
+
+
+def _entries(path):
+    """[(name, is_dir)] for a directory, portable across CPython/MicroPython."""
+    import os
+    out = []
+    try:
+        if hasattr(os, "ilistdir"):          # MicroPython
+            for e in os.ilistdir(path):
+                out.append((e[0], (e[1] & 0x4000) != 0))
+        else:                                 # CPython
+            for n in os.listdir(path):
+                try:
+                    mode = os.stat(path + "/" + n)[0]
+                except OSError:
+                    mode = 0
+                out.append((n, (mode & 0x4000) != 0))
+    except OSError:
+        pass
+    return out
+
+
+def _url_unquote(s):
+    if "%" not in s and "+" not in s:
+        return s
+    s = s.replace("+", " ")
+    out = bytearray()
+    i = 0
+    while i < len(s):
+        if s[i] == "%" and i + 3 <= len(s):
+            try:
+                out.append(int(s[i + 1:i + 3], 16))
+                i += 3
+                continue
+            except ValueError:
+                pass
+        out.append(ord(s[i]))
+        i += 1
+    return bytes(out).decode("utf-8", "replace")
+
+
+def _query(path):
+    q = {}
+    if "?" in path:
+        for kv in path.split("?", 1)[1].split("&"):
+            k, _, v = kv.partition("=")
+            q[k] = _url_unquote(v)
+    return q
+
+
 class WebServer:
     def __init__(self, streamer, cfg, gdir, static_dir, config_file=None):
         self.s = streamer
@@ -68,17 +137,18 @@ class WebServer:
             "loaded": self.loaded,
         }
 
-    def file_list(self):
-        out = []
-        try:
-            import os
-            for n in os.listdir(self.gdir):
-                if n.lower().endswith(_GCODE_EXT):
-                    out.append(n)
-        except OSError:
-            pass
-        out.sort()
-        return out
+    def list_dir(self, subdir=""):
+        rel = _safe_rel(subdir)
+        if rel is None:
+            rel = ""
+        path = self.gdir + ("/" + rel if rel else "")
+        entries = [
+            {"n": n, "d": isdir}
+            for n, isdir in _entries(path)
+            if isdir or n.lower().endswith(_GCODE_EXT)
+        ]
+        entries.sort(key=lambda e: (not e["d"], e["n"].lower()))
+        return {"type": "files", "dir": rel, "entries": entries}
 
     # --- command handling (from the browser) ---
 
@@ -98,12 +168,14 @@ class WebServer:
             if self.s.state != RUNNING:
                 self.s.write_line(cmd.get("line", ""))
         elif c == "load":
-            self.loaded = cmd.get("file")
+            self.loaded = _safe_rel(cmd.get("file", "")) or None
             self.broadcast({"type": "msg", "line": "loaded " + str(self.loaded)})
         elif c == "run":
             self._start_run(cmd.get("file") or self.loaded)
         elif c == "stop":
             self.s.request_stop()
+        elif c == "delete":
+            self._delete(cmd.get("file", ""))
         elif c == "units":
             v = cmd.get("value")
             if v in ("mm", "inch"):
@@ -115,24 +187,39 @@ class WebServer:
                         pass
                 self._apply_units()
         elif c == "files":
-            self.broadcast({"type": "files", "files": self.file_list()})
+            self.broadcast(self.list_dir(cmd.get("dir", "")))
 
     def _start_run(self, f):
         if self.s.state == RUNNING:
             return
-        if not f:
+        rel = _safe_rel(f or "")
+        if not rel:
             self.broadcast({"type": "msg", "line": "no file loaded"})
             return
-        path = self.gdir + "/" + f
+        path = self.gdir + "/" + rel
         try:
             n = validate_gcode(path)
         except (OSError, ValueError) as e:
             self.broadcast({"type": "msg", "line": "error: " + str(e)})
             return
-        self.loaded = f
+        self.loaded = rel
         self.s.begin(path, on_response=self._on_response, on_message=self._on_message,
                      status_interval=self.cfg.rate)
-        self.broadcast({"type": "msg", "line": "streaming %s (%d lines)" % (f, n)})
+        self.broadcast({"type": "msg", "line": "streaming %s (%d lines)" % (rel, n)})
+
+    def _delete(self, f):
+        import os
+        rel = _safe_rel(f or "")
+        if not rel:
+            return
+        try:
+            os.remove(self.gdir + "/" + rel)
+            self.broadcast({"type": "msg", "line": "deleted " + rel})
+            if self.loaded == rel:
+                self.loaded = None
+        except OSError as e:
+            self.broadcast({"type": "msg", "line": "delete failed: " + str(e)})
+        self.broadcast(self.list_dir(rel.rsplit("/", 1)[0] if "/" in rel else ""))
 
     # --- the single driver task ---
 
@@ -192,6 +279,8 @@ class WebServer:
                 hdrs[k.strip().lower()] = v.strip()
             if hdrs.get("upgrade", "").lower() == "websocket":
                 await self._serve_ws(reader, writer, hdrs)
+            elif method == "POST":
+                await self._serve_upload(reader, writer, hdrs, path)
             else:
                 await self._serve_http(writer, path)
         except (EOFError, OSError):
@@ -233,6 +322,54 @@ class WebServer:
         writer.write(head.encode() + body)
         await writer.drain()
 
+    async def _http_text(self, writer, code, text):
+        body = text.encode()
+        head = ("HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n"
+                "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+                % (code, "OK" if code == 200 else "ERR", len(body)))
+        writer.write(head.encode() + body)
+        await writer.drain()
+
+    async def _serve_upload(self, reader, writer, hdrs, path):
+        """POST /upload?name=<file>&dir=<subdir> with the raw file as the body.
+        Streamed to storage in bounded chunks (never buffered whole in RAM)."""
+        q = _query(path)
+        name = _basename(q.get("name", ""))
+        subdir = _safe_rel(q.get("dir", ""))
+        length = int(hdrs.get("content-length", "0") or 0)
+        if not name or subdir is None or self.s.state == RUNNING:
+            await self._drain(reader, length)
+            await self._http_text(writer, 400, "rejected")
+            return
+        dest = self.gdir + (("/" + subdir) if subdir else "") + "/" + name
+        try:
+            f = open(dest, "wb")
+        except OSError as e:
+            await self._drain(reader, length)
+            await self._http_text(writer, 500, "open failed: %s" % e)
+            return
+        remaining = length
+        try:
+            while remaining > 0:
+                chunk = await reader.read(1024 if remaining > 1024 else remaining)
+                if not chunk:
+                    break
+                f.write(chunk)
+                remaining -= len(chunk)
+        finally:
+            f.close()
+        await self._http_text(writer, 200, "ok")
+        self.broadcast({"type": "msg", "line": "uploaded " + name})
+        self.broadcast(self.list_dir(subdir))
+
+    async def _drain(self, reader, n):
+        """Discard n body bytes (so a rejected upload doesn't desync the socket)."""
+        while n > 0:
+            chunk = await reader.read(1024 if n > 1024 else n)
+            if not chunk:
+                break
+            n -= len(chunk)
+
     async def _serve_ws(self, reader, writer, hdrs):
         key = hdrs.get("sec-websocket-key", "").encode()
         resp = ("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
@@ -242,7 +379,7 @@ class WebServer:
         await writer.drain()
         self.clients.append(writer)
         # prime the new client
-        for obj in ({"type": "files", "files": self.file_list()}, self.status_obj()):
+        for obj in (self.list_dir(""), self.status_obj()):
             writer.write(wsproto.encode_text(json.dumps(obj)))
         await writer.drain()
         try:

@@ -70,7 +70,7 @@ def run(streamer, cfg):
     if greeting:
         print('GRBL: "%s"' % greeting)
     _apply_units(streamer, cfg)
-    print("gcgo (MicroPython) — commands: load <f>, run, status, reset, units mm|inch, quit")
+    print("gcgo (MicroPython) — commands: ls, cd, load <f>, run, status, reset, units mm|inch, quit")
     print("Any other input is sent to GRBL as a command.")
 
     loaded = None
@@ -91,11 +91,25 @@ def run(streamer, cfg):
                 break
             elif cmd == "status":
                 print('  "%s"' % streamer.query_status())
+            elif cmd == "ls":
+                import os
+                try:
+                    for nm in sorted(os.listdir(arg or ".")):
+                        print("  " + nm)
+                except OSError as e:
+                    print("  " + str(e))
+            elif cmd == "cd":
+                import os
+                try:
+                    os.chdir(arg or "/")
+                    print("  " + os.getcwd())
+                except OSError as e:
+                    print("  " + str(e))
             elif cmd == "load":
                 if not arg:
                     print("Usage: load <file>")
                 else:
-                    n = len(load_gcode(arg))
+                    n = validate_gcode(arg)
                     loaded = arg
                     print("Loaded %s (%d lines)" % (arg, n))
             elif cmd == "run":
