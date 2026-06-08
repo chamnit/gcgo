@@ -293,7 +293,11 @@ class Streamer:
             if nl < 0:
                 if self._eof:
                     if self._src_end > self._src_pos:        # last line, no newline
-                        self._send_line(self._src_pos, self._src_end, False)
+                        if has_code(self._src, self._src_pos, self._src_end):
+                            self._send_line(self._src_pos, self._src_end, False)
+                        else:
+                            self._consumed += self._src_end - self._src_pos
+                            self._src_pos = self._src_end
                     return
                 if self._src_pos == 0 and self._src_end >= SRC_CAP:
                     self._state = ERROR                      # line longer than SRC_CAP
@@ -304,11 +308,8 @@ class Streamer:
                 continue
             # whole line [start, nl) plus its newline
             start = self._src_pos
-            content = nl
-            if content > start and self._src[content - 1] == 0x0d:  # trailing \r
-                content -= 1
             nbytes = (nl + 1) - start
-            if content == start:                              # blank line — skip
+            if not has_code(self._src, start, nl):            # blank/comment-only — skip
                 self._consumed += nbytes
                 self._src_pos = nl + 1
                 continue
@@ -476,3 +477,24 @@ def _file_size(path) -> int:
         return os.stat(path)[6]
     except (OSError, ImportError):
         return 0
+
+
+def has_code(buf, start: int, end: int) -> bool:
+    """True if buf[start:end] holds executable g-code (not blank and not a
+    pure comment). Scans bytes in place — no allocation. GRBL handles inline
+    '(...)' / ';' comments itself, so those are left in lines that have code;
+    this only filters out lines main would have dropped entirely."""
+    in_paren = False
+    i = start
+    while i < end:
+        c = buf[i]
+        if c == 0x3b:          # ';' -> rest of line is a comment
+            break
+        elif c == 0x28:        # '('
+            in_paren = True
+        elif c == 0x29:        # ')'
+            in_paren = False
+        elif not in_paren and c != 0x20 and c != 0x09 and c != 0x0d:
+            return True         # a real (non-space) code character
+        i += 1
+    return False

@@ -243,14 +243,15 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
     Returns True only if the stream completed cleanly (no error, not stopped).
     """
     try:
-        validate_gcode(path)
+        total = validate_gcode(path)
     except (OSError, ValueError) as e:
         print(f"  {e}")
         return False
 
     def status_line() -> str:
-        prog = f"{streamer.sent} sent  {streamer.progress * 100:.0f}%"
-        return _format_status_line(streamer.status, prog, cfg)
+        sent = streamer.sent
+        pct = (sent * 100 // total) if total else 0
+        return _format_status_line(streamer.status, f"{sent}/{total} ({pct}%)", cfg)
 
     def on_sent(n, line):
         print_above(f"  >> {line}", status_line())
@@ -305,11 +306,11 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
     if err is not None:
         print_above(f"  stream error: {err}", "")
     if state == "error":
-        msg = f"Stream halted on error: {name} ({sent} lines sent)"
+        msg = f"Stream halted on error: {name} ({sent}/{total} lines sent)"
     elif state == "stopped":
-        msg = f"Stream stopped: {name} ({sent} lines sent)"
+        msg = f"Stream stopped: {name} ({sent}/{total} lines sent)"
     else:
-        msg = f"Stream complete: {name} ({sent} lines)"
+        msg = f"Stream complete: {name} ({total} lines)"
     sys.stdout.write(f"\n{msg}\n")
     sys.stdout.flush()
 
