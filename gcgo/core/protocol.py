@@ -382,8 +382,21 @@ class Streamer:
             self._io.write(b"?")
             self._poll_at = now_ms() + self._poll_ms
 
-        # 3) consume all complete response lines available right now (no decode
-        #    on the hot ok/error path — classify by leading bytes)
+        # 3) consume responses, accounting acks against the in-flight buffer
+        self._read_and_route(True)
+        if self._state == ERROR:
+            return self._state
+
+        # 4) completion: file exhausted and every sent line acknowledged
+        if self._eof and self._src_end == self._src_pos and self._acked >= self._sent:
+            self._state = DONE
+            self._close_file()
+        return self._state
+
+    def _read_and_route(self, streaming: bool) -> None:
+        """Read available response bytes and route complete lines (no decode on
+        the hot ok/error path — classify by leading byte). When streaming, ok/
+        error acknowledge the in-flight buffer and an error halts the stream."""
         avail = self._io.any()
         if avail:
             n = self._io.readinto(self._scratchmv[:min(avail, SCRATCH_CAP)])
@@ -398,33 +411,58 @@ class Streamer:
             if end > start and self._rx[end - 1] == 0x0d:
                 end -= 1
             self._rx_pos = nl + 1
-            if end > start:
-                c0 = self._rx[start]
-                if c0 == 0x6f or c0 == 0x65:          # 'o'k / 'e'rror
+            if end <= start:
+                continue
+            c0 = self._rx[start]
+            if c0 == 0x6f or c0 == 0x65:              # 'o'k / 'e'rror
+                if streaming:
                     self._ack()
-                    if self.on_response:
-                        self.on_response(self._acked,
-                                         self._rx[start:end].decode("utf-8", "replace"))
-                    if c0 == 0x65:                      # error -> halt
-                        self._state = ERROR
-                        self._close_file()
-                        self._compact_rx()
-                        return self._state
-                elif c0 == 0x3c:                        # '<' status report
-                    msg = self._rx[start:end].decode("utf-8", "replace")
-                    self.status.update(msg)
-                    if self.on_message:
-                        self.on_message(msg)
-                else:                                   # [MSG:...], ALARM:, etc.
-                    if self.on_message:
-                        self.on_message(self._rx[start:end].decode("utf-8", "replace"))
+                if self.on_response:
+                    self.on_response(self._acked,
+                                     self._rx[start:end].decode("utf-8", "replace"))
+                if c0 == 0x65 and streaming:           # error -> halt the stream
+                    self._state = ERROR
+                    self._close_file()
+                    self._compact_rx()
+                    return
+            elif c0 == 0x3c:                           # '<' status report
+                msg = self._rx[start:end].decode("utf-8", "replace")
+                self.status.update(msg)
+                if self.on_message:
+                    self.on_message(msg)
+            else:                                      # [MSG:...], ALARM:, etc.
+                if self.on_message:
+                    self.on_message(self._rx[start:end].decode("utf-8", "replace"))
         self._compact_rx()
 
-        # 4) completion: file exhausted and every sent line acknowledged
-        if self._eof and self._src_end == self._src_pos and self._acked >= self._sent:
-            self._state = DONE
-            self._close_file()
-        return self._state
+    # --- async-friendly non-blocking command surface (web/uasyncio) ---
+    #
+    # These never block: writes go out immediately and responses are picked up
+    # later by service() (when idle) or pump() (while streaming) and delivered
+    # through on_response / on_message. Set those callbacks once and call
+    # service()/pump() from your event loop.
+
+    def service(self) -> None:
+        """Non-blocking: read and route any pending GRBL output. Use when idle
+        (pump() does this while streaming)."""
+        self._read_and_route(False)
+
+    def request_status(self) -> None:
+        """Non-blocking status request ('?'); reply arrives via service()."""
+        self._io.write(b"?")
+
+    def write_line(self, line: str) -> None:
+        """Non-blocking command send (e.g. MDI); ok/error arrives via service()."""
+        self._send_raw(line)
+
+    def request_reset(self) -> None:
+        """Non-blocking soft-reset; greeting arrives via service()."""
+        self._io.write(b"\x18")
+
+    def request_cancel(self) -> None:
+        """Non-blocking abort: feed-hold then soft-reset; output via service()."""
+        self._io.write(b"!")
+        self._io.write(b"\x18")
 
     def _compact_rx(self) -> None:
         if self._rx_pos > 64:  # compact infrequently, not every pump
