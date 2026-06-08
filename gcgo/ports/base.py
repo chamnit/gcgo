@@ -19,6 +19,11 @@ class Transport:
         Return b"" if nothing arrived within the timeout."""
         raise NotImplementedError
 
+    def readinto(self, buf) -> int:
+        """Read up to len(buf) bytes into the preallocated buffer/memoryview,
+        returning the count (0 if none). Used by the low-alloc stream pump."""
+        raise NotImplementedError
+
     def any(self) -> int:
         """Number of bytes available to read right now, without blocking."""
         raise NotImplementedError

@@ -25,6 +25,9 @@ class PySerialTransport:
     def read(self, n: int = 64) -> bytes:
         return self._s.read(n)
 
+    def readinto(self, buf) -> int:
+        return self._s.readinto(buf) or 0
+
     def any(self) -> int:
         return self._s.in_waiting
 

@@ -7,6 +7,7 @@ that same loop, so no locks are needed. Line assembly is done here on top of
 the transport's raw byte I/O.
 """
 
+import gc
 import time
 
 from gcgo.core.clock import diff_ms, now_ms
@@ -14,6 +15,11 @@ from gcgo.core.status import GRBLStatus
 
 RX_BUFFER_SIZE = 127
 GRBL_BAUD = 115200
+GC_SLACK_MS = 250   # min interval between slack-point gc.collect() calls
+
+SRC_CAP = 256       # source read buffer (must exceed the longest gcode line)
+SCRATCH_CAP = 96    # transport readinto scratch
+RING_CAP = 96       # max gcode lines in flight (127B RX / shortest line)
 
 # stream states
 IDLE = "idle"
@@ -28,22 +34,41 @@ class Streamer:
         self._io = transport
         self._timeout = timeout
         self._io.set_timeout(timeout)
-        self._rx = bytearray()  # buffered, not-yet-newline-terminated input
+        # response assembly (offset-consumed; no per-line realloc)
+        self._rx = bytearray()
+        self._rx_pos = 0
+        # preallocated streaming buffers (reused across jobs — no per-line alloc)
+        self._src = bytearray(SRC_CAP)
+        self._srcmv = memoryview(self._src)
+        self._scratch = bytearray(SCRATCH_CAP)
+        self._scratchmv = memoryview(self._scratch)
+        self._ring = [0] * RING_CAP   # FIFO of in-flight line byte-lengths
+        # Opt-in: collect garbage at slack points (GRBL buffer full) during a
+        # stream, so GC pauses land while there's buffered motion to cover them.
+        # Left off on desktop (CPython GC is incremental and cheap).
+        self.gc_collect = False
+        self._gc_at = 0
         self.status = GRBLStatus()
         self._reset_stream()
 
     def _reset_stream(self) -> None:
-        self._lines: list[str] = []
-        self._total = 0
-        self._sent = 0
-        self._recv = 0
-        self._buf_counts: list[int] = []
-        self._buf_used = 0
+        self._file = None
+        self._size = 0
+        self._consumed = 0          # source bytes consumed (for progress)
+        self._src_pos = 0           # next unread index in _src
+        self._src_end = 0           # valid bytes in _src
+        self._eof = False
+        self._sent = 0              # lines sent
+        self._acked = 0             # lines acknowledged
+        self._buf_used = 0          # bytes in flight (GRBL RX budget)
+        self._if_head = 0           # in-flight ring head/tail/count
+        self._if_tail = 0
+        self._if_count = 0
         self._sent_any = False
         self._state = IDLE
         self._poll_ms = 0
         self._poll_at = 0
-        self.on_progress = None
+        self.on_sent = None
         self.on_response = None
         self.on_message = None
 
@@ -72,6 +97,7 @@ class Streamer:
     def flush_input(self) -> None:
         """Drop any pending input (transport buffer and our line buffer)."""
         self._rx = bytearray()
+        self._rx_pos = 0
         if self._io.is_open():
             self._io.reset_input()
 
@@ -82,12 +108,19 @@ class Streamer:
     # --- line assembly ---
 
     def _next_line(self):
-        """Pop one complete line from the rx buffer, or None if none buffered."""
-        nl = self._rx.find(b"\n")
+        """Pop one complete line from the rx buffer, or None if none buffered.
+
+        Consumes via a read offset and compacts only occasionally, so there is
+        no per-line O(n) buffer reallocation.
+        """
+        nl = self._rx.find(b"\n", self._rx_pos)
         if nl < 0:
             return None
-        s = self._rx[:nl].decode("utf-8", "replace").strip()
-        self._rx = self._rx[nl + 1:]  # reassign (MicroPython has no bytearray del-slice)
+        s = self._rx[self._rx_pos:nl].decode("utf-8", "replace").strip()
+        self._rx_pos = nl + 1
+        if self._rx_pos > 64:  # compact infrequently, not every line
+            self._rx = self._rx[self._rx_pos:]
+            self._rx_pos = 0
         return s
 
     def _readline(self) -> str:
@@ -180,7 +213,7 @@ class Streamer:
         time.sleep(0.3)
         return self.soft_reset()
 
-    # --- streaming (non-blocking pump) ---
+    # --- streaming (non-blocking pump, streamed from a file) ---
 
     @property
     def state(self) -> str:
@@ -191,25 +224,33 @@ class Streamer:
         return self._sent
 
     @property
-    def total(self) -> int:
-        return self._total
+    def progress(self) -> float:
+        """Fraction of the source file consumed, 0.0..1.0 (0 if size unknown)."""
+        return (self._consumed / self._size) if self._size else 0.0
 
     @property
     def sent_any(self) -> bool:
         return self._sent_any
 
-    def begin(self, lines, on_progress=None, on_response=None, on_message=None,
+    def begin(self, path, on_sent=None, on_response=None, on_message=None,
               status_interval: float = 1.0) -> None:
-        """Start streaming the given list of cleaned gcode lines."""
+        """Start streaming a gcode file by path. Lines are read on demand into a
+        preallocated buffer and forwarded as raw bytes (GRBL handles comments,
+        spaces, and case), so nothing is loaded into RAM up front.
+
+        Callbacks are invoked (with decoded text) only when set, so the MCU hot
+        path stays allocation-free by leaving them None.
+        """
         self._reset_stream()
-        self._lines = lines
-        self._total = len(lines)
-        self.on_progress = on_progress
+        self.on_sent = on_sent
         self.on_response = on_response
         self.on_message = on_message
         self.flush_input()
-        if self._total == 0:
-            self._state = DONE
+        try:
+            self._size = _file_size(path)
+            self._file = open(path, "rb")
+        except OSError:
+            self._state = ERROR
             return
         self._state = RUNNING
         self._poll_ms = int(status_interval * 1000)
@@ -220,57 +261,180 @@ class Streamer:
     def request_stop(self) -> None:
         if self._state == RUNNING:
             self._state = STOPPED
+            self._close_file()
+
+    def _close_file(self) -> None:
+        if self._file is not None:
+            try:
+                self._file.close()
+            except OSError:
+                pass
+            self._file = None
+
+    def _refill_src(self) -> None:
+        """Compact consumed bytes and read more of the file into _src."""
+        rem = self._src_end - self._src_pos
+        if self._src_pos > 0:
+            self._src[0:rem] = self._src[self._src_pos:self._src_end]
+            self._src_pos = 0
+            self._src_end = rem
+        if self._src_end >= SRC_CAP:
+            return  # buffer full with no newline — line too long (caught below)
+        k = self._file.readinto(self._srcmv[self._src_end:])
+        if not k:
+            self._eof = True
+        else:
+            self._src_end += k
+
+    def _fill_grbl(self) -> None:
+        """Send as many whole lines as fit in GRBL's RX buffer."""
+        while True:
+            nl = self._src.find(b"\n", self._src_pos, self._src_end)
+            if nl < 0:
+                if self._eof:
+                    if self._src_end > self._src_pos:        # last line, no newline
+                        self._send_line(self._src_pos, self._src_end, False)
+                    return
+                if self._src_pos == 0 and self._src_end >= SRC_CAP:
+                    self._state = ERROR                      # line longer than SRC_CAP
+                    return
+                self._refill_src()
+                if self._state == ERROR:
+                    return
+                continue
+            # whole line [start, nl) plus its newline
+            start = self._src_pos
+            content = nl
+            if content > start and self._src[content - 1] == 0x0d:  # trailing \r
+                content -= 1
+            nbytes = (nl + 1) - start
+            if content == start:                              # blank line — skip
+                self._consumed += nbytes
+                self._src_pos = nl + 1
+                continue
+            if nbytes > RX_BUFFER_SIZE:                        # can never fit — bad file
+                self._state = ERROR
+                return
+            if self._buf_used + nbytes > RX_BUFFER_SIZE:
+                return                                        # full; resume next pump
+            if not self._send_line(start, nl, True):
+                return
+
+    def _send_line(self, start: int, content_end: int, has_nl: bool) -> bool:
+        """Write one line (raw bytes) to GRBL and record it in the in-flight ring.
+        content_end is the index of '\\n' (has_nl) or end-of-data. Returns False
+        if it didn't fit (no newline case re-checked here)."""
+        if has_nl:
+            nbytes = (content_end + 1) - start
+        else:
+            nbytes = (content_end - start) + 1  # we append the missing newline
+        if self._buf_used + nbytes > RX_BUFFER_SIZE:
+            return False
+        if has_nl:
+            self._io.write(self._srcmv[start:content_end + 1])
+        else:
+            self._io.write(self._srcmv[start:content_end])
+            self._io.write(b"\n")
+        self._ring[self._if_tail] = nbytes
+        self._if_tail = (self._if_tail + 1) % RING_CAP
+        self._if_count += 1
+        self._buf_used += nbytes
+        self._consumed += nbytes
+        self._sent += 1
+        self._sent_any = True
+        if self.on_sent:
+            text = self._src[start:content_end].decode("utf-8", "replace").strip()
+            self.on_sent(self._sent, text)
+        if has_nl:
+            self._src_pos = content_end + 1
+        else:
+            self._src_pos = content_end
+        return True
+
+    def _ack(self) -> None:
+        if self._if_count:
+            self._buf_used -= self._ring[self._if_head]
+            self._if_head = (self._if_head + 1) % RING_CAP
+            self._if_count -= 1
+        self._acked += 1
 
     def pump(self) -> str:
         """Advance the stream by a bounded, non-blocking step. Returns state."""
         if self._state != RUNNING:
             return self._state
 
-        # 1) fill GRBL's RX buffer as far as it fits
-        while self._sent < self._total:
-            line = self._lines[self._sent] + "\n"
-            n = len(line)
-            if self._buf_used + n > RX_BUFFER_SIZE:
-                break
-            self._io.write(line.encode())
-            self._buf_counts.append(n)
-            self._buf_used += n
-            self._sent += 1
-            self._sent_any = True
-            if self.on_progress:
-                self.on_progress(self._sent, self._total, line.strip())
+        # 1) fill GRBL's RX buffer from the file
+        self._fill_grbl()
+        if self._state == ERROR:
+            self._close_file()
+            return self._state
+
+        # 1b) collect garbage now if asked and GRBL's buffer is full — the
+        #     planner has buffered motion to cover the pause. Throttled.
+        if self.gc_collect and self._buf_used >= RX_BUFFER_SIZE - 40:
+            now = now_ms()
+            if diff_ms(now, self._gc_at) >= 0:
+                gc.collect()
+                self._gc_at = now + GC_SLACK_MS
 
         # 2) timed status poll
         if self._poll_ms and diff_ms(now_ms(), self._poll_at) >= 0:
             self._io.write(b"?")
             self._poll_at = now_ms() + self._poll_ms
 
-        # 3) consume all complete response lines available right now
+        # 3) consume all complete response lines available right now (no decode
+        #    on the hot ok/error path — classify by leading bytes)
         avail = self._io.any()
         if avail:
-            self._rx.extend(self._io.read(avail))
+            n = self._io.readinto(self._scratchmv[:min(avail, SCRATCH_CAP)])
+            if n:
+                self._rx.extend(self._scratchmv[:n])
         while True:
-            line = self._next_line()
-            if line is None:
+            nl = self._rx.find(b"\n", self._rx_pos)
+            if nl < 0:
                 break
-            if not line:
-                continue
-            if line.startswith(("ok", "error")):
-                if self._buf_counts:
-                    self._buf_used -= self._buf_counts.pop(0)
-                self._recv += 1
-                if self.on_response:
-                    self.on_response(self._recv, line)
-                if line.startswith("error"):
-                    self._state = ERROR
-                    return self._state
-                if self._recv >= self._total:
-                    self._state = DONE
-                    return self._state
-            else:
-                if line.startswith("<"):
-                    self.status.update(line)
-                if self.on_message:
-                    self.on_message(line)
+            start = self._rx_pos
+            end = nl
+            if end > start and self._rx[end - 1] == 0x0d:
+                end -= 1
+            self._rx_pos = nl + 1
+            if end > start:
+                c0 = self._rx[start]
+                if c0 == 0x6f or c0 == 0x65:          # 'o'k / 'e'rror
+                    self._ack()
+                    if self.on_response:
+                        self.on_response(self._acked,
+                                         self._rx[start:end].decode("utf-8", "replace"))
+                    if c0 == 0x65:                      # error -> halt
+                        self._state = ERROR
+                        self._close_file()
+                        self._compact_rx()
+                        return self._state
+                elif c0 == 0x3c:                        # '<' status report
+                    msg = self._rx[start:end].decode("utf-8", "replace")
+                    self.status.update(msg)
+                    if self.on_message:
+                        self.on_message(msg)
+                else:                                   # [MSG:...], ALARM:, etc.
+                    if self.on_message:
+                        self.on_message(self._rx[start:end].decode("utf-8", "replace"))
+        self._compact_rx()
 
+        # 4) completion: file exhausted and every sent line acknowledged
+        if self._eof and self._src_end == self._src_pos and self._acked >= self._sent:
+            self._state = DONE
+            self._close_file()
         return self._state
+
+    def _compact_rx(self) -> None:
+        if self._rx_pos > 64:  # compact infrequently, not every pump
+            self._rx = self._rx[self._rx_pos:]
+            self._rx_pos = 0
+
+
+def _file_size(path) -> int:
+    try:
+        import os
+        return os.stat(path)[6]
+    except (OSError, ImportError):
+        return 0

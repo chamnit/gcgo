@@ -25,6 +25,9 @@ class UARTTransport:
         data = self._uart.read(n)
         return data if data is not None else b""
 
+    def readinto(self, buf) -> int:
+        return self._uart.readinto(buf) or 0
+
     def any(self):
         return self._uart.any()
 

@@ -11,7 +11,7 @@ Usage on the board:
 import time
 
 from gcgo.core.config import StatusConfig
-from gcgo.core.gcode import load_gcode
+from gcgo.core.gcode import validate_gcode
 from gcgo.core.protocol import RUNNING, Streamer
 from gcgo.micropython.transport import UARTTransport
 
@@ -32,30 +32,24 @@ def _status_line(st, cfg):
 
 def _stream(streamer, cfg, path):
     try:
-        lines = load_gcode(path)
+        total = validate_gcode(path)
     except (OSError, ValueError) as e:
         print("  " + str(e))
         return
 
-    def on_response(n, resp):
-        if resp.startswith("error"):
-            print('  [%d] "%s"' % (n, resp))
-
-    def on_message(msg):
-        if not msg.startswith("<"):
-            print('  "%s"' % msg)
-
-    streamer.begin(lines, on_response=on_response, on_message=on_message,
-                   status_interval=cfg.rate)
-    print("Streaming %s (%d lines) — Ctrl-C to stop" % (path, streamer.total))
+    # No per-line callbacks on the MCU hot path — keeps the pump allocation-free.
+    streamer.gc_collect = True   # collect at slack points (GRBL buffer full)
+    streamer.begin(path, status_interval=cfg.rate)
+    print("Streaming %s (%d lines) — Ctrl-C to stop" % (path, total))
 
     next_print = time.ticks_ms()
     try:
         while streamer.pump() == RUNNING:
             now = time.ticks_ms()
             if time.ticks_diff(now, next_print) >= 0:
-                print("  %d/%d  %s" % (streamer.sent, streamer.total,
-                                       _status_line(streamer.status, cfg)))
+                print("  %d/%d  %.0f%%  %s" % (streamer.sent, total,
+                                               streamer.progress * 100,
+                                               _status_line(streamer.status, cfg)))
                 next_print = now + 1000
             time.sleep_ms(3)
     except KeyboardInterrupt:
@@ -63,9 +57,9 @@ def _stream(streamer, cfg, path):
 
     state = streamer.state
     if state == "done":
-        print("Stream complete: %s (%d lines)" % (path, streamer.total))
+        print("Stream complete: %s (%d lines)" % (path, streamer.sent))
     else:
-        print("Stream %s: %s (%d/%d)" % (state, path, streamer.sent, streamer.total))
+        print("Stream %s: %s (%d/%d)" % (state, path, streamer.sent, total))
     if state != "done" and streamer.sent_any:
         g = streamer.cancel()
         print("Machine reset to halt motion." + ((' "%s"' % g) if g else ""))

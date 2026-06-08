@@ -8,7 +8,7 @@ import sys
 import time
 
 from gcgo.core.config import StatusConfig
-from gcgo.core.gcode import load_gcode
+from gcgo.core.gcode import validate_gcode
 from gcgo.core.protocol import RUNNING, Streamer
 from gcgo.core.status import GRBLStatus
 from gcgo.core.tables import (
@@ -243,18 +243,16 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
     Returns True only if the stream completed cleanly (no error, not stopped).
     """
     try:
-        lines = load_gcode(path)
+        validate_gcode(path)
     except (OSError, ValueError) as e:
         print(f"  {e}")
         return False
 
-    progress = [""]
-
     def status_line() -> str:
-        return _format_status_line(streamer.status, progress[0], cfg)
+        prog = f"{streamer.sent} sent  {streamer.progress * 100:.0f}%"
+        return _format_status_line(streamer.status, prog, cfg)
 
-    def on_progress(s, t, line):
-        progress[0] = f"{s}/{t} ({s * 100 // t}%)"
+    def on_sent(n, line):
         print_above(f"  >> {line}", status_line())
 
     def on_response(n, resp):
@@ -274,7 +272,7 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
         else:
             print_above(_grbl(msg), status_line())
 
-    streamer.begin(lines, on_progress=on_progress, on_response=on_response,
+    streamer.begin(path, on_sent=on_sent, on_response=on_response,
                    on_message=on_message, status_interval=cfg.rate)
 
     keymap = _build_keymap(cfg)
@@ -302,16 +300,16 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
             err = e
             streamer.request_stop()
 
-    state, sent, total = streamer.state, streamer.sent, streamer.total
+    state, sent = streamer.state, streamer.sent
     name = os.path.basename(path)
     if err is not None:
         print_above(f"  stream error: {err}", "")
     if state == "error":
-        msg = f"Stream halted on error: {name} ({sent}/{total} lines sent)"
+        msg = f"Stream halted on error: {name} ({sent} lines sent)"
     elif state == "stopped":
-        msg = f"Stream stopped: {name} ({sent}/{total} lines sent)"
+        msg = f"Stream stopped: {name} ({sent} lines sent)"
     else:
-        msg = f"Stream complete: {name} ({total} lines)"
+        msg = f"Stream complete: {name} ({sent} lines)"
     sys.stdout.write(f"\n{msg}\n")
     sys.stdout.flush()
 
@@ -574,7 +572,7 @@ def _repl(streamer: Streamer, cfg: StatusConfig) -> None:
                 else:
                     path = os.path.expanduser(arg)
                     try:
-                        n = len(load_gcode(path))
+                        n = validate_gcode(path)
                     except (OSError, ValueError) as e:
                         print(f"  {e}")
                     else:

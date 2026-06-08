@@ -1,32 +1,27 @@
-"""G-code loading and validation (portable; uses builtin open())."""
+"""G-code validation (portable; streams the file, never loads it into RAM)."""
 
 from gcgo.core.protocol import RX_BUFFER_SIZE
 
 
-def load_gcode(path) -> list[str]:
-    """Read a gcode file and return the cleaned, non-empty lines as streamed.
-
-    Raises ValueError if any line (plus its newline) can't fit in GRBL's RX
-    buffer, which would otherwise deadlock the character-counting stream loop.
+def validate_gcode(path) -> int:
+    """Stream the file once to count non-blank lines and reject any line that
+    can't fit GRBL's RX buffer (which would deadlock the stream). Returns the
+    non-blank line count. Used at load time for feedback; streaming itself
+    reads the file again on demand without buffering it.
     """
-    with open(path) as f:
-        raw = f.read().splitlines()
-    lines = [_strip_comment(l) for l in raw]
-    lines = [l for l in lines if l]
-    for n, l in enumerate(lines, 1):
-        if len(l) + 1 > RX_BUFFER_SIZE:
-            raise ValueError(
-                "line %d is %d chars, exceeds the %d-byte GRBL buffer: %s..."
-                % (n, len(l) + 1, RX_BUFFER_SIZE, l[:40])
-            )
-    return lines
-
-
-def _strip_comment(line: str) -> str:
-    """Remove GRBL inline comments and whitespace."""
-    line = line.split(";")[0]
-    paren = line.find("(")
-    if paren != -1:
-        end = line.find(")", paren)
-        line = line[:paren] + (line[end + 1:] if end != -1 else "")
-    return line.strip().upper()
+    n = 0
+    with open(path, "rb") as f:
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            content = line.rstrip(b"\r\n")
+            if not content:
+                continue  # blank line — streamer skips it
+            if len(content) + 1 > RX_BUFFER_SIZE:
+                raise ValueError(
+                    "a line is %d chars, exceeds the %d-byte GRBL buffer"
+                    % (len(content) + 1, RX_BUFFER_SIZE)
+                )
+            n += 1
+    return n
