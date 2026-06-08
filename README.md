@@ -130,9 +130,29 @@ mpremote connect /dev/ttyACM0 exec "from gcgo.micropython.main import start; sta
 `start(1, tx=4, rx=5)` on many ESP32s). Wire the board's UART TX/RX/GND to the
 GRBL controller's serial pins.
 
-Note: g-code files are currently loaded fully into RAM, so on small boards the
-file must fit in available memory (fine for typical jobs; very large files would
-need streaming from SD, not yet implemented).
+G-code is streamed from a file on demand (nothing is loaded into RAM), so file
+size isn't limited by memory — put jobs on an SD card or flash.
+
+### Headless web pendant (Pico W)
+
+A WiFi board can serve a browser UI (live status, file run/stop, feed
+overrides, MDI) with no display or keyboard — the whole stack is a dependency-
+free `uasyncio` HTTP + WebSocket server sharing the same core. Verified on a
+Raspberry Pi Pico W with GRBL on UART0 (GP16/17) and a hardware reset line on
+GP18, through level shifters:
+
+```
+mpremote connect /dev/ttyACM0 cp -r gcgo :
+# put WIFI_SSID / WIFI_PASS in a secrets.py on the board, then:
+mpremote connect /dev/ttyACM0 exec "from gcgo.micropython.webmain import start; start()"
+```
+
+It prints the board's IP; open `http://<board-ip>/`. The desktop build serves
+the identical UI via `python -m gcgo.desktop.webmain <port>`.
+
+**Wiring note:** on an ATmega Arduino, the USB port and pins 0/1 are the same
+UART — don't drive the board from USB and the Pico's UART at once (bus
+contention). Use one at a time.
 
 ## Requirements
 
