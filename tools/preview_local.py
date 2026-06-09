@@ -17,16 +17,24 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gcgo.frontends.localui import LocalUI
 
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+FONTS = {
+    "courier": "/usr/share/fonts/opentype/urw-base35/NimbusMonoPS-Regular.otf",
+    "dejavu": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "free": "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+    "liberation": "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+}
+FONT = os.environ.get("GCGO_FONT", FONTS["courier"])
 ON = (180, 222, 255)   # lit pixel (OLED-ish white-blue)
 OFF = (0, 0, 0)
 
 
 class PILDisplay:
-    """Display adapter onto a PIL image at 128x64, 1-bit look. Glyphs are placed
-    on the 8*scale px grid so the 16-col layout matches the real 8x8 font."""
-    def __init__(self, w=128, h=64, zoom=7):
+    """Display adapter onto a PIL image at 128x64, 1-bit look. Glyphs are
+    centered in the 8*scale px grid so the 16-col layout matches the real 8x8
+    font without the gappy left-aligned look."""
+    def __init__(self, w=128, h=64, zoom=7, font=FONT):
         self.width, self.height, self.zoom = w, h, zoom
+        self.font_path = font
         self.img = Image.new("RGB", (w * zoom, h * zoom), OFF)
         self.dr = ImageDraw.Draw(self.img)
         self._fonts = {}
@@ -34,7 +42,7 @@ class PILDisplay:
     def _font(self, scale):
         px = 8 * scale * self.zoom
         if px not in self._fonts:
-            self._fonts[px] = ImageFont.truetype(FONT, int(px * 0.92))
+            self._fonts[px] = ImageFont.truetype(self.font_path, int(px * 0.92))
         return self._fonts[px]
 
     def _col(self, rgb):
@@ -51,8 +59,11 @@ class PILDisplay:
         z = self.zoom
         f = self._font(scale)
         col = self._col(rgb)
-        for j, ch in enumerate(s):          # one glyph per 8*scale cell
-            self.dr.text(((x + j * 8 * scale) * z, y * z), ch, fill=col, font=f)
+        cell = 8 * scale * z
+        for j, ch in enumerate(s):          # one glyph per 8*scale cell, centered
+            gw = self.dr.textlength(ch, font=f)
+            ox = (cell - gw) / 2
+            self.dr.text(((x + j * 8 * scale) * z + ox, y * z), ch, fill=col, font=f)
 
     def show(self):
         pass
