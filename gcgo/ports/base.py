@@ -41,3 +41,48 @@ class Transport:
 
     def close(self) -> None:
         raise NotImplementedError
+
+
+class Display:
+    """A small pixel display for the local-UI front-end (e.g. an ILI9341 TFT).
+
+    Colors are (r, g, b) tuples 0-255; the adapter converts to the panel's
+    native format. Primitives are kept minimal so both a real driver and the
+    desktop PNG preview can implement them. Origin is top-left.
+    """
+
+    width = 0
+    height = 0
+
+    def fill(self, rgb) -> None:
+        """Clear the whole screen to one color."""
+        raise NotImplementedError
+
+    def rect(self, x, y, w, h, rgb) -> None:
+        """Draw a filled rectangle."""
+        raise NotImplementedError
+
+    def text(self, x, y, s, rgb, scale: int = 1) -> None:
+        """Draw a line of text at (x, y). Monospace; each glyph cell is
+        8*scale wide and 8*scale tall."""
+        raise NotImplementedError
+
+    def show(self) -> None:
+        """Flush the back buffer to the panel (no-op for direct-draw drivers)."""
+        raise NotImplementedError
+
+
+class Input:
+    """A source of high-level UI events for the local-UI front-end.
+
+    poll() returns a (possibly empty) list of event strings drained since the
+    last call. This abstraction is what lets a rotary-encoder+buttons adapter
+    and a future touchscreen adapter feed the same UI:
+
+        "cw" / "ccw"  rotary step (or +/- region)
+        "click"       encoder push / primary confirm
+        "a" "b" "c"   the three buttons (or tapped soft-buttons)
+    """
+
+    def poll(self) -> list:
+        raise NotImplementedError
