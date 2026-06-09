@@ -64,7 +64,8 @@ button:disabled{ opacity:.4; cursor:not-allowed; }
 .row{ display:flex; gap:.45rem; flex-wrap:wrap; align-items:center; }
 
 /* jog */
-.jogwrap{ display:flex; gap:.9rem; flex-wrap:wrap; align-items:flex-start; }
+.jogwrap{ display:flex; gap:.9rem; flex-wrap:wrap; align-items:flex-start;
+          justify-content:space-between; }
 .pad{ display:grid; grid-template-columns:repeat(3,3rem); grid-template-rows:repeat(3,3rem);
       gap:.4rem; }
 .pad button{ padding:0; font-size:1.1rem; display:flex; align-items:center; justify-content:center; }
@@ -74,15 +75,14 @@ button:disabled{ opacity:.4; cursor:not-allowed; }
 .jcol{ display:flex; flex-direction:column; gap:.3rem; }
 .jcol .lbl{ color:var(--mut); font-size:.72rem; letter-spacing:.04em; }
 .jcol input{ width:5rem; }
-.zerocol{ margin-left:auto; }     /* push Work Zero to the right side */
-.zbtns{ display:grid; grid-template-columns:repeat(2,1fr); gap:.3rem; }
-.zbtns button{ min-width:2.6rem; padding:.5rem .2rem; }
-.zerocol > button{ padding:.45rem .2rem; font-size:.82rem; }
+.zbtns{ display:flex; flex-direction:column; gap:.3rem; }
+.zbtns button{ min-width:3.6rem; padding:.35rem .9rem; font-size:.84rem; }
+.zerocol > button{ padding:.35rem .9rem; font-size:.82rem; }
 /* horizontal segmented (settings) and vertical segmented (jog step) */
 .seg{ display:flex; gap:.3rem; flex-wrap:wrap; }
 .seg button{ flex:1; min-width:2.6rem; padding:.4rem .2rem; font-size:.82rem; }
 .segv{ display:flex; flex-direction:column; gap:.3rem; }
-.segv button{ padding:.5rem .9rem; min-width:3.4rem; font-size:.84rem; }
+.segv button{ padding:.35rem .9rem; min-width:3.6rem; font-size:.84rem; }
 .seg button.on,.segv button.on{ background:var(--accent2); border-color:#6f93bd; color:#eaf2fb; }
 .fld{ display:flex; align-items:center; gap:.5rem; color:var(--mut); font-size:.82rem; }
 .fld input{ width:5.5rem; }
