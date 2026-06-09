@@ -1,19 +1,25 @@
-"""Portable local-UI front-end: a small color TFT + rotary-encoder pendant.
+"""Portable local-UI front-end: SSD1306 OLED + rotary encoder + 4 buttons.
 
-Drives the same Streamer core as the terminal/web front-ends through the
-non-blocking pump(), rendering to a Display adapter and consuming high-level
-events from an Input adapter (see gcgo/ports/base.py). It has no platform
-imports beyond os (file listing), so it runs on MicroPython on the board and
-on CPython for the PNG preview (tools/preview_local.py).
+A standalone pendant (no WiFi, no host). Drives the same Streamer core as the
+terminal/web front-ends through the non-blocking pump(), rendering to a Display
+adapter and consuming high-level events from an Input adapter (ports/base.py).
+No platform imports beyond os (file listing), so it runs on MicroPython on the
+board and on CPython for the PNG preview (tools/preview_local.py).
 
-Interaction (rotary encoder + 3 buttons; a touchscreen can emit the same
-events later):
+Controls -- 4 buttons (X, Y, Z, Menu) + rotary encoder (turn + click):
 
-  JOG screen    rotate = jog selected axis by step;  click = next axis
-                A = next step size;  B = zero axis;   C = file browser
-  FILES screen  rotate = scroll;  click = open dir / run file
-                B = up a directory;  C = back to jog
-  RUN screen    A = hold/resume;  B = stop;  rotate = feed override +/-10%
+  JOG (home)   X/Y/Z = pick axis;  long-press axis = zero it
+               turn = jog active axis by step;  click = cycle step size
+               Menu = open the menu
+  MENU         turn = scroll;  click = select;  Menu = back to jog
+               items: Files, Home ($H), Unlock ($X), Units, Reset
+  FILES        turn = scroll;  click = open dir / pick file (-> confirm)
+               ".." entry goes up;  Menu = back to menu
+  CONFIRM      click = start the job;  Menu = cancel
+  RUN          turn = feed override +/-10% (value shown);  click = reset 100%
+               X = hold/resume;  Z = stop
+
+Input events: "cw" "ccw" "click" "x" "y" "z" "x_hold" "y_hold" "z_hold" "menu".
 """
 
 import os
@@ -29,6 +35,7 @@ FG = (255, 255, 255)
 
 AXES = ("X", "Y", "Z")
 STEPS = (0.1, 1.0, 10.0, 100.0)
+MENU = ("files", "home", "unlock", "units", "reset")
 _GCODE_EXT = (".gcode", ".nc", ".g", ".gc", ".ngc")
 
 
@@ -63,13 +70,15 @@ def _list(path):
 
 
 class LocalUI:
-    def __init__(self, streamer, cfg, gdir, display, inp, jog_feed=800):
+    def __init__(self, streamer, cfg, gdir, display, inp, jog_feed=800,
+                 config_file=None):
         self.s = streamer
         self.cfg = cfg
         self.gdir = gdir.rstrip("/")
         self.d = display
         self.inp = inp
         self.jog_feed = jog_feed
+        self.config_file = config_file
 
         self.mode = "jog"
         self.axis_i = 0
@@ -77,7 +86,9 @@ class LocalUI:
         self.cwd = ""
         self.entries = []
         self.sel = 0
-        self.top = 0          # scroll offset in file list
+        self.top = 0
+        self.menu_sel = 0
+        self.confirm = None   # rel path awaiting run confirmation
         self.held = False
         self.loaded = None
 
@@ -121,19 +132,29 @@ class LocalUI:
         self._dirty = True
 
     def _ev_jog(self, ev):
-        if ev in ("cw", "ccw"):
+        if ev in ("x", "y", "z"):
+            self.axis_i = "xyz".index(ev)
+        elif ev in ("x_hold", "y_hold", "z_hold"):
+            self.s.write_line("G10 L20 P0 %s0" % ev[0].upper())
+        elif ev in ("cw", "ccw"):
             sign = "" if ev == "cw" else "-"
             self.s.write_line("$J=G91 G21 %s%s%g F%d" % (
                 AXES[self.axis_i], sign, STEPS[self.step_i], self.jog_feed))
         elif ev == "click":
-            self.axis_i = (self.axis_i + 1) % 3
-        elif ev == "a":
             self.step_i = (self.step_i + 1) % len(STEPS)
-        elif ev == "b":
-            self.s.write_line("G10 L20 P0 %s0" % AXES[self.axis_i])
-        elif ev == "c":
-            self._refresh_files()
-            self.mode = "files"
+        elif ev == "menu":
+            self.menu_sel = 0
+            self.mode = "menu"
+
+    def _ev_menu(self, ev):
+        if ev == "cw":
+            self.menu_sel = min(self.menu_sel + 1, len(MENU) - 1)
+        elif ev == "ccw":
+            self.menu_sel = max(self.menu_sel - 1, 0)
+        elif ev == "click":
+            self._menu_act(MENU[self.menu_sel])
+        elif ev == "menu":
+            self.mode = "jog"
 
     def _ev_files(self, ev):
         n = len(self.entries)
@@ -145,45 +166,72 @@ class LocalUI:
             if not self.entries:
                 return
             name, isdir = self.entries[self.sel]
-            if isdir:
+            if name == "..":
+                self.cwd = self.cwd.rsplit("/", 1)[0] if "/" in self.cwd else ""
+                self._refresh_files()
+            elif isdir:
                 self.cwd = (self.cwd + "/" + name) if self.cwd else name
                 self._refresh_files()
             else:
-                self._start_run(name)
-        elif ev == "b":
-            if self.cwd:
-                self.cwd = self.cwd.rsplit("/", 1)[0] if "/" in self.cwd else ""
-                self._refresh_files()
-        elif ev == "c":
-            self.mode = "jog"
+                self.confirm = (self.cwd + "/" + name) if self.cwd else name
+                self.mode = "confirm"
+        elif ev == "menu":
+            self.mode = "menu"
+
+    def _ev_confirm(self, ev):
+        if ev == "click":
+            self._do_run(self.confirm)
+        elif ev == "menu":
+            self.mode = "files"
 
     def _ev_run(self, ev):
-        if ev == "a":
-            if self.held:
-                self.s.cycle_start()
-            else:
-                self.s.feed_hold()
-            self.held = not self.held
-        elif ev == "b":
-            self.s.request_stop()
-        elif ev == "cw":
+        if ev == "cw":
             self.s.feed_override_plus10()
         elif ev == "ccw":
             self.s.feed_override_minus10()
+        elif ev == "click":
+            self.s.feed_override_reset()
+        elif ev == "x":
+            (self.s.cycle_start if self.held else self.s.feed_hold)()
+            self.held = not self.held
+        elif ev == "z":
+            self.s.request_stop()
 
     # ---- helpers ----
+    def _menu_act(self, key):
+        if key == "files":
+            self._refresh_files()
+            self.mode = "files"
+        elif key == "home":
+            self.s.write_line("$H")
+            self.mode = "jog"
+        elif key == "unlock":
+            self.s.write_line("$X")
+            self.mode = "jog"
+        elif key == "units":
+            self.cfg.units = "inch" if self.cfg.units == "mm" else "mm"
+            self.s.write_line("$13=" + self.cfg.grbl_inch)
+            if self.config_file:
+                try:
+                    self.cfg.save(self.config_file)
+                except OSError:
+                    pass
+        elif key == "reset":
+            self.s.request_reset()
+            self.mode = "jog"
+
     def _refresh_files(self):
         path = self.gdir + ("/" + self.cwd if self.cwd else "")
-        self.entries = _list(path)
+        self.entries = ([("..", True)] if self.cwd else []) + _list(path)
         self.sel = 0
         self.top = 0
 
-    def _start_run(self, name):
-        rel = (self.cwd + "/" + name) if self.cwd else name
+    def _do_run(self, rel):
         path = self.gdir + "/" + rel
         try:
             validate_gcode(path)
         except (OSError, ValueError):
+            self.mode = "files"
             return
         self.loaded = rel
         self.held = False
@@ -199,20 +247,15 @@ class LocalUI:
         st = self.s.status
         wp = st.wpos
         return (self.mode, self.s.state, self.axis_i, self.step_i, self.sel,
-                len(self.entries), self.cwd, self.loaded, self.held,
-                round(wp[0], 3), round(wp[1], 3), round(wp[2], 3),
-                int(st.feed), st.feed_ov,
+                len(self.entries), self.cwd, self.menu_sel, self.confirm,
+                self.loaded, self.held, round(wp[0], 3), round(wp[1], 3),
+                round(wp[2], 3), int(st.feed), st.feed_ov,
                 self.s.sent, round(self.s.progress, 2))
 
     # ---- rendering (128x64 mono OLED; 16 cols x 8 rows of 8px text) ----
     def _render(self):
         self.d.fill(BG)
-        if self.mode == "jog":
-            self._screen_jog()
-        elif self.mode == "files":
-            self._screen_files()
-        else:
-            self._screen_run()
+        getattr(self, "_screen_" + self.mode)()
         self.d.show()
 
     def _line(self, y, left, right="", scale=1, inv=False):
@@ -227,14 +270,19 @@ class LocalUI:
             d.text(d.width - len(right) * cw, y, right, fg, scale)
 
     def _screen_jog(self):
-        st = self.s.status.state or "-"
-        self._line(0, st[:8], "F%d" % int(self.s.status.feed))
+        self._line(0, (self.s.status.state or "-")[:8],
+                   "F%d" % int(self.s.status.feed))
         wp = self.s.status.wpos
         for i, ax in enumerate(AXES):
-            # "X" + 7-wide number = 8 chars at scale 2 -> full 128px width
             self._line(8 + i * 16, "%s%7.3f" % (ax, wp[i]), scale=2,
                        inv=(i == self.axis_i))
-        self._line(56, "STEP %gmm" % STEPS[self.step_i])
+        self._line(56, "STEP %gmm" % STEPS[self.step_i], "MENU")
+
+    def _screen_menu(self):
+        self._line(0, "MENU", inv=True)
+        labels = ("Files", "Home  $H", "Unlock $X", "Units " + self.cfg.units, "Reset")
+        for i, lab in enumerate(labels):
+            self._line(8 + i * 8, lab, inv=(i == self.menu_sel))
 
     def _screen_files(self):
         self._line(0, ("/" + self.cwd)[:16], inv=True)
@@ -250,14 +298,21 @@ class LocalUI:
             label = (name + "/") if isdir else name
             self._line(8 + (i - self.top) * 8, label[:16], inv=(i == self.sel))
 
+    def _screen_confirm(self):
+        name = (self.confirm or "").rsplit("/", 1)[-1]
+        self._line(0, "RUN FILE?", inv=True)
+        self._line(18, name[:16])
+        self._line(38, "click = START")
+        self._line(50, "MENU  = cancel")
+
     def _screen_run(self):
         self._line(0, (self.s.status.state or "Run")[:8],
                    "F%d" % int(self.s.status.feed))
-        self._line(12, (self.loaded or "")[:16])
-        # framed progress bar
+        self._line(10, (self.loaded or "")[:16])
         d = self.d
-        d.rect(2, 26, 124, 10, FG)
-        d.rect(3, 27, 122, 8, BG)
-        d.rect(3, 27, int(122 * self.s.progress), 8, FG)
-        self._line(40, "%d sent" % self.s.sent, "%d%%" % int(self.s.progress * 100))
-        self._line(54, "HOLD" if self.held else "A:hold  B:stop")
+        d.rect(2, 22, 124, 8, FG)
+        d.rect(3, 23, 122, 6, BG)
+        d.rect(3, 23, int(122 * self.s.progress), 6, FG)
+        self._line(34, "%d sent" % self.s.sent, "%d%%" % int(self.s.progress * 100))
+        self._line(46, "FEED OVR", "%d%%" % self.s.status.feed_ov)
+        self._line(56, "X:resume Z:stop" if self.held else "X:hold  Z:stop")

@@ -98,6 +98,7 @@ class FakeStreamer:
 class Cfg:
     grbl_inch = "0"
     pos_unit = "mm"
+    units = "mm"
     rate = 0.5
 
 
@@ -125,13 +126,22 @@ def jog(ui):
     ui.mode = "jog"; ui.axis_i = 0; ui.step_i = 2
 
 
+def menu(ui):
+    ui.mode = "menu"; ui.menu_sel = 1
+
+
 def files(ui):
     ui.mode = "files"; ui._refresh_files(); ui.sel = 2
+
+
+def confirm(ui):
+    ui.mode = "confirm"; ui.confirm = "braid.gcode"
 
 
 def run(ui):
     ui.s.status.state = "Run"
     ui.s.status.feed = 800
+    ui.s.status.feed_ov = 110
     ui.s.sent = 1024
     ui.s.progress = 0.45
     ui.mode = "run"; ui.loaded = "braid.gcode"
@@ -139,5 +149,7 @@ def run(ui):
 
 if __name__ == "__main__":
     render("jog", jog)
+    render("menu", menu)
     render("files", files)
+    render("confirm", confirm)
     render("run", run)

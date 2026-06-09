@@ -79,9 +79,11 @@ class Input:
     last call. This abstraction is what lets a rotary-encoder+buttons adapter
     and a future touchscreen adapter feed the same UI:
 
-        "cw" / "ccw"  rotary step (or +/- region)
-        "click"       encoder push / primary confirm
-        "a" "b" "c"   the three buttons (or tapped soft-buttons)
+        "cw" / "ccw"             rotary turn (or +/- region)
+        "click"                  encoder push
+        "x" "y" "z"              the axis buttons (short press)
+        "x_hold" "y_hold" "z_hold"  axis button long-press (zero that axis)
+        "menu"                   the menu button
     """
 
     def poll(self) -> list:

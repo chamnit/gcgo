@@ -75,12 +75,14 @@ class SimStreamer:
         return self.state
 
     def request_stop(self): self._stop = True
+    def request_reset(self): self.status.state = "Idle"
     def request_cancel(self):
         self.status.state = "Idle"
     def feed_hold(self): self.status.state = "Hold"
     def cycle_start(self): self.status.state = "Run"
     def feed_override_plus10(self): self.status.feed_ov += 10
     def feed_override_minus10(self): self.status.feed_ov -= 10
+    def feed_override_reset(self): self.status.feed_ov = 100
 
 
 class ScriptedInput:
@@ -128,22 +130,25 @@ def run_story(steps, out, cols=3):
 
 
 PART1 = [
-    (None,   "Start: live DRO. Encoder jogs active axis (X)"),
-    ("cw",   "Rotate CW: jog X +1.00 (1 detent = step)"),
-    ("a",    "Button A: step 1 -> 10 mm"),
-    ("cw",   "Rotate CW: jog X +10.00 (10 mm steps now)"),
-    ("click","Click: next axis  X -> Y"),
-    ("b",    "Button B: zero active axis (Y -> 0)"),
+    (None,    "HOME: turn knob to jog the active axis (X)"),
+    ("cw",    "Turn CW: jog X +1.00 (step = 1 mm)"),
+    ("click", "Encoder click: step 1 -> 10 mm"),
+    ("cw",    "Turn CW: jog X +10.00"),
+    ("y",     "Press Y: select Y axis (direct, no cycling)"),
+    ("ccw",   "Turn CCW: jog Y -10.00"),
+    ("y_hold","Hold Y: zero Y axis -> 0.000"),
 ]
 
 PART2 = [
-    ("c",    "Button C: open file browser"),
-    ("cw",   "Rotate: scroll list"),
-    ("cw",   "Rotate: scroll list"),
-    ("click","Click: run highlighted file"),
-    ("ccw",  "Rotate: feed override -10%"),
-    ("b",    "Button B: stop stream"),
-    (None,   "Back to HOME, ready to jog"),
+    ("menu",  "Press Menu: open the menu"),
+    ("click", "Click Files: open the browser"),
+    ("cw",    "Turn: scroll (jobs -> tests)"),
+    ("cw",    "Turn: scroll (-> braid.gcode)"),
+    ("click", "Click: pick file -> confirm"),
+    ("click", "Click: START the job"),
+    ("cw",    "Turn: feed override +10% (shown)"),
+    ("z",     "Press Z: stop"),
+    (None,    "Back to HOME, ready to jog"),
 ]
 
 if __name__ == "__main__":
