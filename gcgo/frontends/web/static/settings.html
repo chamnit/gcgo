@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gcgo · settings</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <a class="navbtn" href="/" title="Back">←</a>
+  <span class="brand"><b>gc</b>go</span>
+  <span class="htitle">Settings</span>
+  <span class="spacer"></span>
+  <span id="state" class="badge offline">offline</span>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Machine</h2>
+    <div class="settings">
+      <div class="setrow">
+        <span class="setlbl">Units</span>
+        <div class="seg" id="unitseg">
+          <button data-units="mm">mm</button>
+          <button data-units="inch">inch</button>
+        </div>
+      </div>
+      <div class="setrow">
+        <span class="setlbl">Status poll</span>
+        <div class="fld"><input type="number" id="rateinp" value="0.5" min="0" max="10" step="0.1"
+                                onchange="send({cmd:'rate',value:parseFloat(this.value)})"> s
+          <span class="hint">(0 = off)</span></div>
+      </div>
+      <div class="setrow">
+        <span class="setlbl">After run</span>
+        <div class="seg" id="afterseg">
+          <button data-after="keep">Keep file</button>
+          <button data-after="clear">Unload file</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Show Overrides <span class="sub">hide groups your machine doesn't use</span></h2>
+    <div class="setrow">
+      <div class="toggles" id="ovshow">
+        <button data-ov="feed">Feed</button>
+        <button data-ov="rapid">Rapid</button>
+        <button data-ov="spindle">Spindle</button>
+        <button data-ov="toggles">Coolant</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/settings.js"></script>
+</body>
+</html>

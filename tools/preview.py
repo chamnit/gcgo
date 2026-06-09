@@ -60,11 +60,20 @@ CONSOLE_SEED = [
 ]
 
 
-def build_html(state, nfiles=5):
-    with open(os.path.join(STATIC, "index.html")) as f:
+PAGE_JS = {"index": "app.js", "settings": "settings.js"}
+
+
+def build_html(state, nfiles=5, page="index"):
+    with open(os.path.join(STATIC, page + ".html")) as f:
         html = f.read()
-    with open(os.path.join(STATIC, "app.js")) as f:
+    jsname = PAGE_JS[page]
+    with open(os.path.join(STATIC, jsname)) as f:
         appjs = f.read()
+    with open(os.path.join(STATIC, "style.css")) as f:
+        css = f.read()
+    # inline the shared stylesheet so file:// rendering has styles
+    html = html.replace('<link rel="stylesheet" href="/style.css">',
+                        "<style>\n" + css + "\n</style>")
 
     msgs = json.dumps(mock_messages(state, nfiles))
     shim = """
@@ -83,13 +92,13 @@ window.WebSocket = MockWS;
 %s
 </script>
 <script>
-// seed console with scripted tx/rx history for the preview
-setTimeout(() => { for (const [l, c] of %s) log(l, c); }, 5);
+// seed console with scripted tx/rx history for the preview (index page only)
+setTimeout(() => { if (window.log) for (const [l, c] of %s) log(l, c); }, 5);
 </script>
 """ % (msgs, appjs, json.dumps(CONSOLE_SEED))
 
     # drop the external script tag; inline our shimmed version instead
-    html = html.replace('<script src="/app.js"></script>', shim)
+    html = html.replace('<script src="/%s"></script>' % jsname, shim)
     return html
 
 
@@ -97,12 +106,13 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--state", default="Run", help="GRBL state to mock (Run/Idle/Hold/Alarm)")
     p.add_argument("--files", type=int, default=5, help="number of mock file entries")
+    p.add_argument("--page", default="index", choices=("index", "settings"))
     p.add_argument("-o", "--out", default="/tmp/gcgo_preview.png")
     p.add_argument("--width", type=int, default=820)
     p.add_argument("--height", type=int, default=1180)
     args = p.parse_args()
 
-    html = build_html(args.state, args.files)
+    html = build_html(args.state, args.files, args.page)
     html_path = "/tmp/gcgo_preview.html"
     with open(html_path, "w") as f:
         f.write(html)
