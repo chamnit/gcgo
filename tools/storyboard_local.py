@@ -15,10 +15,11 @@ from gcgo.frontends.localui import LocalUI
 from gcgo.core.protocol import RUNNING
 from tools.preview_local import PILDisplay, Cfg, make_gdir, FONT
 
-CAP = ImageFont.truetype(FONT, 14)
+CAP = ImageFont.truetype(FONT, 18)
 ACCENT = (136, 192, 208)
 MUT = (150, 160, 175)
 BG = (8, 10, 13)
+CELL_ZOOM = 4   # 128x64 -> 512x256 per storyboard cell
 
 
 class SimStatus:
@@ -91,7 +92,7 @@ class ScriptedInput:
 
 def run_story(steps, out, cols=3):
     inp = ScriptedInput()
-    ui = LocalUI(SimStreamer(), Cfg(), make_gdir(), PILDisplay(zoom=1), inp)
+    ui = LocalUI(SimStreamer(), Cfg(), make_gdir(), PILDisplay(zoom=CELL_ZOOM), inp)
     ui._refresh_files()
     frames = []
     for ev, cap in steps:
@@ -100,7 +101,8 @@ def run_story(steps, out, cols=3):
         ui.tick()
         frames.append((ui.d.img.copy(), cap))
 
-    cw, ch, caph, pad = 320, 240, 30, 14
+    cw, ch = frames[0][0].size
+    caph, pad = 34, 16
     rows = (len(frames) + cols - 1) // cols
     W = cols * cw + (cols + 1) * pad
     H = rows * (ch + caph) + (rows + 1) * pad

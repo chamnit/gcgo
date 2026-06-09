@@ -22,21 +22,10 @@ from gcgo.core.clock import now_ms, diff_ms
 from gcgo.core.gcode import validate_gcode
 from gcgo.core.protocol import RUNNING
 
-# palette (r, g, b)
-BG = (15, 18, 22)
-PANEL = (29, 34, 43)
-LINE = (42, 49, 60)
-TXT = (227, 232, 240)
-MUT = (136, 147, 163)
-ACCENT = (136, 192, 208)
-GRN = (108, 160, 90)
-RED = (160, 70, 78)
-YEL = (235, 203, 139)
-
-STATE_COLOR = {
-    "Idle": (44, 66, 86), "Run": (51, 64, 31), "Hold": (74, 58, 24),
-    "Alarm": (74, 34, 38), "Jog": (44, 66, 86), "Home": (44, 66, 86),
-}
+# 1-bit OLED palette: off (background) and on (lit pixel). Highlight = an
+# inverse bar (fill FG, draw text in BG) since there's no color to work with.
+BG = (0, 0, 0)
+FG = (255, 255, 255)
 
 AXES = ("X", "Y", "Z")
 STEPS = (0.1, 1.0, 10.0, 100.0)
@@ -215,86 +204,60 @@ class LocalUI:
                 int(st.feed), st.feed_ov,
                 self.s.sent, round(self.s.progress, 2))
 
-    # ---- rendering ----
+    # ---- rendering (128x64 mono OLED; 16 cols x 8 rows of 8px text) ----
     def _render(self):
-        d = self.d
-        d.fill(BG)
-        self._header()
+        self.d.fill(BG)
         if self.mode == "jog":
             self._screen_jog()
         elif self.mode == "files":
             self._screen_files()
         else:
             self._screen_run()
-        self._footer()
-        d.show()
+        self.d.show()
 
-    def _header(self):
+    def _line(self, y, left, right="", scale=1, inv=False):
+        """One text row; optional right-justified field; optional inverse bar."""
         d = self.d
-        st = self.s.status.state or "—"
-        d.rect(0, 0, d.width, 26, PANEL)
-        d.rect(6, 5, 70, 17, STATE_COLOR.get(st, LINE))
-        d.text(12, 9, st[:8], TXT, 1)
-        d.text(d.width - 96, 9, "%s F%d" % (self.cfg.pos_unit, int(self.s.status.feed)), MUT, 1)
-
-    def _dro(self, y):
-        d = self.d
-        wp = self.s.status.wpos
-        for i, ax in enumerate(AXES):
-            yy = y + i * 28
-            hot = (self.mode == "jog" and i == self.axis_i)
-            d.text(10, yy + 4, ax, ACCENT if hot else MUT, 2)
-            d.text(40, yy, "%9.3f" % wp[i], TXT, 2)
-            if hot:
-                d.rect(4, yy, 3, 22, ACCENT)
-        return y + 3 * 28
+        cw = 8 * scale
+        if inv:
+            d.rect(0, y, d.width, 8 * scale, FG)
+        fg = BG if inv else FG
+        d.text(0, y, left, fg, scale)
+        if right:
+            d.text(d.width - len(right) * cw, y, right, fg, scale)
 
     def _screen_jog(self):
-        d = self.d
-        y = self._dro(34)
-        d.rect(0, y + 4, d.width, 1, LINE)
-        d.text(10, y + 12, "STEP", MUT, 1)
-        d.text(60, y + 10, "%g mm" % STEPS[self.step_i], YEL, 2)
-        d.text(10, y + 36, "FEED", MUT, 1)
-        d.text(60, y + 34, "%d mm/min" % self.jog_feed, TXT, 2)
+        st = self.s.status.state or "-"
+        self._line(0, st[:8], "F%d" % int(self.s.status.feed))
+        wp = self.s.status.wpos
+        for i, ax in enumerate(AXES):
+            # "X" + 7-wide number = 8 chars at scale 2 -> full 128px width
+            self._line(8 + i * 16, "%s%7.3f" % (ax, wp[i]), scale=2,
+                       inv=(i == self.axis_i))
+        self._line(56, "STEP %gmm" % STEPS[self.step_i])
 
     def _screen_files(self):
-        d = self.d
-        d.text(10, 32, "/" + self.cwd, ACCENT, 1)
+        self._line(0, ("/" + self.cwd)[:16], inv=True)
         rows = 6
         if self.sel < self.top:
             self.top = self.sel
         elif self.sel >= self.top + rows:
             self.top = self.sel - rows + 1
-        y = 46
         if not self.entries:
-            d.text(14, y, "(empty)", MUT, 1)
+            self._line(24, "  (empty)")
         for i in range(self.top, min(self.top + rows, len(self.entries))):
             name, isdir = self.entries[i]
-            yy = y + (i - self.top) * 24
-            if i == self.sel:
-                d.rect(6, yy - 3, d.width - 12, 22, PANEL)
-            d.text(14, yy, ("[" + name + "]") if isdir else name,
-                   ACCENT if isdir else TXT, 1)
+            label = (name + "/") if isdir else name
+            self._line(8 + (i - self.top) * 8, label[:16], inv=(i == self.sel))
 
     def _screen_run(self):
+        self._line(0, (self.s.status.state or "Run")[:8],
+                   "F%d" % int(self.s.status.feed))
+        self._line(12, (self.loaded or "")[:16])
+        # framed progress bar
         d = self.d
-        self._dro(34)
-        y = 122
-        pct = int(self.s.progress * 100)
-        d.rect(10, y, d.width - 20, 16, PANEL)
-        d.rect(10, y, int((d.width - 20) * self.s.progress), 16, GRN)
-        d.text(10, y + 24, "%s  %d sent  %d%%" % (self.loaded or "", self.s.sent, pct), TXT, 1)
-        if self.held:
-            d.text(10, y + 44, "HOLD", YEL, 2)
-
-    def _footer(self):
-        d = self.d
-        y = d.height - 20
-        d.rect(0, y - 2, d.width, 22, PANEL)
-        hints = {
-            "jog": "A:step  B:zero  C:files",
-            "files": "click:open  B:up  C:jog",
-            "run": "A:hold  B:stop  rot:feed",
-        }
-        d.text(8, y + 4, hints.get(self.mode, ""), MUT, 1)
+        d.rect(2, 26, 124, 10, FG)
+        d.rect(3, 27, 122, 8, BG)
+        d.rect(3, 27, int(122 * self.s.progress), 8, FG)
+        self._line(40, "%d sent" % self.s.sent, "%d%%" % int(self.s.progress * 100))
+        self._line(54, "HOLD" if self.held else "A:hold  B:stop")
