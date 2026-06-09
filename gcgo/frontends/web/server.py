@@ -139,7 +139,8 @@ class WebServer:
 
     def settings_obj(self):
         return {"type": "settings", "units": self.cfg.units,
-                "rate": self.cfg.rate, "after": self.cfg.after}
+                "rate": self.cfg.rate, "after": self.cfg.after,
+                "overrides": dict(self.cfg.overrides)}
 
     def _save_cfg(self):
         if self.config_file:
@@ -207,6 +208,12 @@ class WebServer:
             v = cmd.get("value")
             if v in ("keep", "clear"):
                 self.cfg.after = v
+                self._save_cfg()
+                self.broadcast(self.settings_obj())
+        elif c == "ovconfig":
+            g = cmd.get("group")
+            if g in self.cfg.overrides:
+                self.cfg.overrides[g] = bool(cmd.get("value"))
                 self._save_cfg()
                 self.broadcast(self.settings_obj())
         elif c == "files":

@@ -28,7 +28,6 @@ function handle(m) {
     setAxis("z", m.wpos[2], m.mpos[2]);
     $("feed").textContent = m.feed.toFixed(0) + (u === "in" ? " in/m" : " mm/m");
     $("spindle").textContent = m.spindle.toFixed(0) + " rpm";
-    $("ov").textContent = m.ov[0] + "/" + m.ov[1] + "/" + m.ov[2];
     $("ovf").textContent = m.ov[0] + "%";
     $("ovr").textContent = m.ov[1] + "%";
     $("ovs").textContent = m.ov[2] + "%";
@@ -47,6 +46,7 @@ function handle(m) {
     segSet("unitseg", "units", m.units);
     segSet("afterseg", "after", m.after);
     if (document.activeElement !== $("rateinp")) $("rateinp").value = m.rate;
+    applyOverrides(m.overrides || {});
   } else if (m.type === "msg") {
     const cls = /^(error|ALARM|\[MSG:.*rror)/i.test(m.line) ? "err" : "rx";
     log(m.line, cls);
@@ -112,16 +112,38 @@ function zero(...axes) {
 // segmented controls (jog step, units, after-run)
 document.addEventListener("click", (e) => {
   const b = e.target.closest(".seg button");
-  if (!b) return;
-  for (const x of b.parentElement.children) x.classList.toggle("on", x === b);
-  if (b.dataset.step) step = parseFloat(b.dataset.step);
-  else if (b.dataset.units) send({ cmd: "units", value: b.dataset.units });
-  else if (b.dataset.after) send({ cmd: "after", value: b.dataset.after });
+  if (b) {
+    for (const x of b.parentElement.children) x.classList.toggle("on", x === b);
+    if (b.dataset.step) step = parseFloat(b.dataset.step);
+    else if (b.dataset.units) send({ cmd: "units", value: b.dataset.units });
+    else if (b.dataset.after) send({ cmd: "after", value: b.dataset.after });
+    return;
+  }
+  // override-visibility toggles (independent on/off)
+  const t = e.target.closest("#ovshow button");
+  if (t) {
+    const on = !t.classList.contains("on");
+    t.classList.toggle("on", on);
+    setOvrow(t.dataset.ov, on);
+    send({ cmd: "ovconfig", group: t.dataset.ov, value: on });
+  }
 });
 function segSet(id, attr, val) {
   const seg = $(id);
   if (!seg) return;
   for (const x of seg.children) x.classList.toggle("on", x.dataset[attr] === String(val));
+}
+function setOvrow(group, on) {
+  const row = $("ovrow-" + group);
+  if (row) row.style.display = on ? "" : "none";
+}
+function applyOverrides(ov) {
+  for (const g of ["feed", "rapid", "spindle", "toggles"]) {
+    const on = ov[g] !== false;
+    setOvrow(g, on);
+    const btn = document.querySelector('#ovshow button[data-ov="' + g + '"]');
+    if (btn) btn.classList.toggle("on", on);
+  }
 }
 
 // --- files ---

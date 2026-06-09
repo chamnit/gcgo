@@ -20,6 +20,10 @@ class StatusConfig:
     DEFAULT_UNITS = "mm"     # "mm" or "inch"; gcgo owns GRBL's $13 to match
     DEFAULT_AFTER = "clear"  # after a completed run: "keep" or "clear" the file
 
+    # which override groups a front-end should offer (not every machine has a
+    # spindle or coolant); all on by default
+    OVERRIDE_GROUPS = ("feed", "rapid", "spindle", "toggles")
+
     # ordered (key, description, default) — order is the display order
     FIELDS = (
         ("state",      "machine state",      True),
@@ -39,6 +43,7 @@ class StatusConfig:
         self.rate = self.DEFAULT_RATE
         self.units = self.DEFAULT_UNITS
         self.after = self.DEFAULT_AFTER
+        self.overrides = {g: True for g in self.OVERRIDE_GROUPS}
         self.keys = {
             aid: {"key": dkey, "enabled": denabled}
             for aid, _desc, dkey, denabled, _m in STREAM_ACTIONS
@@ -80,6 +85,11 @@ class StatusConfig:
             self.units = data["units"]
         if data.get("after") in ("keep", "clear"):
             self.after = data["after"]
+        ov = data.get("overrides", {})
+        if isinstance(ov, dict):
+            for g in self.overrides:
+                if g in ov:
+                    self.overrides[g] = bool(ov[g])
         saved_keys = data.get("keys", {})
         if not isinstance(saved_keys, dict):
             saved_keys = {}
@@ -99,6 +109,7 @@ class StatusConfig:
                     "rate": self.rate,
                     "units": self.units,
                     "after": self.after,
+                    "overrides": self.overrides,
                     "keys": self.keys,
                 },
                 indent=2,

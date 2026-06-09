@@ -139,6 +139,9 @@
   .setrow .seg{ flex:0 0 auto; }
   .setrow .seg button{ min-width:4.5rem; flex:0 0 auto; }
   .hint{ color:var(--mut); font-size:.75rem; }
+  .toggles{ display:flex; gap:.35rem; flex-wrap:wrap; }
+  .toggles button{ padding:.4rem .75rem; font-size:.82rem; opacity:.5; }
+  .toggles button.on{ background:var(--accent2); border-color:#6f93bd; color:#eaf2fb; opacity:1; }
 </style>
 </head>
 <body>
@@ -161,7 +164,6 @@
     <div class="stats">
       <span class="chip">Feed <b id="feed">0</b></span>
       <span class="chip">Spindle <b id="spindle">0</b></span>
-      <span class="chip">Ovr <b id="ov">100/100/100</b></span>
       <span class="chip">Pins <b id="pins">-</b></span>
     </div>
   </div>
@@ -249,7 +251,7 @@
   <div class="card">
     <h2>Overrides</h2>
     <div class="ovr">
-      <div class="ovrrow">
+      <div class="ovrrow" id="ovrow-feed">
         <div class="ovrlbl">Feed <b id="ovf">100%</b></div>
         <div class="btngrp">
           <button onclick="rt('feed_down')">−10</button>
@@ -259,7 +261,7 @@
           <button onclick="rt('feed_up')">+10</button>
         </div>
       </div>
-      <div class="ovrrow">
+      <div class="ovrrow" id="ovrow-rapid">
         <div class="ovrlbl">Rapid <b id="ovr">100%</b></div>
         <div class="btngrp">
           <button onclick="rt('rapid_25')">25%</button>
@@ -267,7 +269,7 @@
           <button onclick="rt('rapid_100')">100%</button>
         </div>
       </div>
-      <div class="ovrrow">
+      <div class="ovrrow" id="ovrow-spindle">
         <div class="ovrlbl">Spindle <b id="ovs">100%</b></div>
         <div class="btngrp">
           <button onclick="rt('spindle_down')">−10</button>
@@ -277,7 +279,7 @@
           <button onclick="rt('spindle_up')">+10</button>
         </div>
       </div>
-      <div class="ovrrow">
+      <div class="ovrrow" id="ovrow-toggles">
         <div class="ovrlbl">Toggles</div>
         <div class="btngrp">
           <button onclick="rt('spindle_stop')">Spindle Stop</button>
@@ -328,6 +330,15 @@
         <div class="seg" id="afterseg">
           <button data-after="keep">Keep file</button>
           <button data-after="clear">Unload file</button>
+        </div>
+      </div>
+      <div class="setrow">
+        <span class="setlbl">Show overrides</span>
+        <div class="toggles" id="ovshow">
+          <button data-ov="feed">Feed</button>
+          <button data-ov="rapid">Rapid</button>
+          <button data-ov="spindle">Spindle</button>
+          <button data-ov="toggles">Coolant</button>
         </div>
       </div>
     </div>

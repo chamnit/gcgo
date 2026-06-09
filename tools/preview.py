@@ -44,7 +44,8 @@ def mock_messages(state, nfiles=5):
     for i in range(len(entries), nfiles):
         entries.append({"n": "job_%02d.gcode" % i, "d": False})
     files = {"type": "files", "dir": "", "entries": entries[:max(nfiles, 1)]}
-    settings = {"type": "settings", "units": "mm", "rate": 0.5, "after": "clear"}
+    settings = {"type": "settings", "units": "mm", "rate": 0.5, "after": "clear",
+                "overrides": {"feed": True, "rapid": True, "spindle": True, "toggles": False}}
     msgs = [settings, files, status]
     if running:
         msgs.append({"type": "msg", "line": "streaming braid.gcode (2361 lines)"})
