@@ -12,41 +12,32 @@ import os
 import sys
 import tempfile
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gcgo.frontends.localui import LocalUI
+from tools.fb_font import FONT8
 
-FONTS = {
-    "courier": "/usr/share/fonts/opentype/urw-base35/NimbusMonoPS-Regular.otf",
-    "dejavu": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "free": "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
-    "liberation": "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-}
-FONT = os.environ.get("GCGO_FONT", FONTS["courier"])
 ON = (180, 222, 255)   # lit pixel (OLED-ish white-blue)
 OFF = (0, 0, 0)
 
 
 class PILDisplay:
-    """Display adapter onto a PIL image at 128x64, 1-bit look. Glyphs are
-    centered in the 8*scale px grid so the 16-col layout matches the real 8x8
-    font without the gappy left-aligned look."""
-    def __init__(self, w=128, h=64, zoom=7, font=FONT):
+    """Faithful 128x64 1-bit preview: renders the SSD1306 framebuffer
+    pixel-for-pixel using MicroPython's built-in 8x8 font, scaled up by `zoom`.
+    text() draws each font pixel as a scale*scale block, exactly as the device
+    adapter will (framebuf for scale 1, scaled blit for scale 2)."""
+    def __init__(self, w=128, h=64, zoom=7, font=None):
         self.width, self.height, self.zoom = w, h, zoom
-        self.font_path = font
         self.img = Image.new("RGB", (w * zoom, h * zoom), OFF)
         self.dr = ImageDraw.Draw(self.img)
-        self._fonts = {}
-
-    def _font(self, scale):
-        px = 8 * scale * self.zoom
-        if px not in self._fonts:
-            self._fonts[px] = ImageFont.truetype(self.font_path, int(px * 0.92))
-        return self._fonts[px]
 
     def _col(self, rgb):
         return OFF if tuple(rgb) == OFF else ON
+
+    def _px(self, x, y, col):
+        z = self.zoom
+        self.dr.rectangle([x * z, y * z, (x + 1) * z - 1, (y + 1) * z - 1], fill=col)
 
     def fill(self, rgb):
         self.dr.rectangle([0, 0, self.img.width, self.img.height], fill=self._col(rgb))
@@ -56,14 +47,19 @@ class PILDisplay:
         self.dr.rectangle([x * z, y * z, (x + w) * z - 1, (y + h) * z - 1], fill=self._col(rgb))
 
     def text(self, x, y, s, rgb, scale=1):
-        z = self.zoom
-        f = self._font(scale)
         col = self._col(rgb)
-        cell = 8 * scale * z
-        for j, ch in enumerate(s):          # one glyph per 8*scale cell, centered
-            gw = self.dr.textlength(ch, font=f)
-            ox = (cell - gw) / 2
-            self.dr.text(((x + j * 8 * scale) * z + ox, y * z), ch, fill=col, font=f)
+        for ci, ch in enumerate(s):
+            idx = (ord(ch) - 32) * 8
+            if idx < 0 or idx + 8 > len(FONT8):
+                continue
+            gx = x + ci * 8 * scale
+            for cx in range(8):                # column-major font
+                bits = FONT8[idx + cx]
+                for cy in range(8):
+                    if bits & (1 << cy):
+                        for sx in range(scale):
+                            for sy in range(scale):
+                                self._px(gx + cx * scale + sx, y + cy * scale + sy, col)
 
     def show(self):
         pass

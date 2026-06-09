@@ -13,9 +13,9 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gcgo.frontends.localui import LocalUI
 from gcgo.core.protocol import RUNNING
-from tools.preview_local import PILDisplay, Cfg, make_gdir, FONT
+from tools.preview_local import PILDisplay, Cfg, make_gdir
 
-CAP = ImageFont.truetype(FONT, 18)
+CAP = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18)
 ACCENT = (136, 192, 208)
 MUT = (150, 160, 175)
 BG = (8, 10, 13)
