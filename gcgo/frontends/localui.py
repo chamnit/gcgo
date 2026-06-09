@@ -270,13 +270,16 @@ class LocalUI:
             d.text(d.width - len(right) * cw, y, right, fg, scale)
 
     def _screen_jog(self):
-        self._line(0, (self.s.status.state or "-")[:8],
-                   "F%d" % int(self.s.status.feed))
+        d = self.d
+        self._line(0, (self.s.status.state or "-")[:8], self.cfg.pos_unit, inv=True)
         wp = self.s.status.wpos
         for i, ax in enumerate(AXES):
-            self._line(8 + i * 16, "%s%7.3f" % (ax, wp[i]), scale=2,
-                       inv=(i == self.axis_i))
-        self._line(56, "STEP %gmm" % STEPS[self.step_i], "MENU")
+            y = 8 + i * 16
+            d.text(0, y, "%s%7.3f" % (ax, wp[i]), FG, 2)
+            if i == self.axis_i:               # mark active axis by its letter
+                d.rect(0, y, 16, 16, FG)
+                d.text(0, y, ax, BG, 2)
+        self._line(56, "STEP %gmm" % STEPS[self.step_i], "MENU", inv=True)
 
     def _screen_menu(self):
         self._line(0, "MENU", inv=True)
