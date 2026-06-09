@@ -66,15 +66,16 @@
           <input type="number" id="jogfeed" value="1000" min="1" step="50">
         </div>
       </div>
-    </div>
-    <div class="jogfoot">
-      <span class="zlbl">Work Zero</span>
-      <button onclick="zero('X')">X</button>
-      <button onclick="zero('Y')">Y</button>
-      <button onclick="zero('Z')">Z</button>
-      <button class="accent" onclick="zero('X','Y','Z')">All</button>
-      <span class="spacer"></span>
-      <button onclick="send({cmd:'mdi',line:'G90 G0 X0 Y0'})">Go to XY0</button>
+      <div class="jcol zerocol">
+        <div class="lbl">WORK ZERO</div>
+        <div class="zbtns">
+          <button onclick="zero('X')">X</button>
+          <button onclick="zero('Y')">Y</button>
+          <button onclick="zero('Z')">Z</button>
+          <button class="accent" onclick="zero('X','Y','Z')">All</button>
+        </div>
+        <button onclick="send({cmd:'mdi',line:'G90 G0 X0 Y0'})">Go to XY0</button>
+      </div>
     </div>
   </div>
 
