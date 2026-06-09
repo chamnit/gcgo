@@ -113,8 +113,10 @@ def make_gdir():
     d = tempfile.mkdtemp()
     os.mkdir(d + "/jobs")
     os.mkdir(d + "/tests")
+    body = "".join("G1 X%d Y%d\n" % (i, i) for i in range(40))
     for n in ("braid.gcode", "sample.gcode", "spoilboard.gcode"):
-        open(d + "/" + n, "w").close()
+        with open(d + "/" + n, "w") as f:
+            f.write(body)
     return d
 
 
@@ -151,7 +153,7 @@ def run(ui):
     ui.s.status.feed_ov = 110
     ui.s.sent = 1024
     ui.s.progress = 0.45
-    ui.mode = "run"; ui.loaded = "braid.gcode"
+    ui.mode = "run"; ui.loaded = "braid.gcode"; ui.total = 2361
 
 
 if __name__ == "__main__":

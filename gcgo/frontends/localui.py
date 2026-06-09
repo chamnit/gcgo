@@ -91,6 +91,7 @@ class LocalUI:
         self.confirm = None   # rel path awaiting run confirmation
         self.held = False
         self.loaded = None
+        self.total = 0        # lines in the running job
 
         self._sig = None
         self._dirty = True
@@ -229,7 +230,7 @@ class LocalUI:
     def _do_run(self, rel):
         path = self.gdir + "/" + rel
         try:
-            validate_gcode(path)
+            self.total = validate_gcode(path)
         except (OSError, ValueError):
             self.mode = "files"
             return
@@ -306,13 +307,20 @@ class LocalUI:
         self._line(50, "MENU  = cancel")
 
     def _screen_run(self):
-        self._line(0, (self.s.status.state or "Run")[:8],
-                   "F%d" % int(self.s.status.feed))
-        self._line(10, (self.loaded or "")[:16])
         d = self.d
-        d.rect(2, 22, 124, 8, FG)
-        d.rect(3, 23, 122, 6, BG)
-        d.rect(3, 23, int(122 * self.s.progress), 6, FG)
-        self._line(34, "%d sent" % self.s.sent, "%d%%" % int(self.s.progress * 100))
-        self._line(46, "FEED OVR", "%d%%" % self.s.status.feed_ov)
-        self._line(56, "X:resume Z:stop" if self.held else "X:hold  Z:stop")
+        pct = int(self.s.progress * 100)
+        # top bar: state + job progress %
+        self._line(0, (self.s.status.state or "Run")[:8], "%d%%" % pct, inv=True)
+        self._line(10, (self.loaded or "")[:16])
+        # job progress bar + lines
+        d.rect(2, 20, 124, 7, FG); d.rect(3, 21, 122, 5, BG)
+        d.rect(3, 21, int(122 * self.s.progress), 5, FG)
+        self._line(30, "%d / %d" % (self.s.sent, self.total))
+        # feed override: value + a bar with a tick at 100% (turn knob to change)
+        ov = self.s.status.feed_ov
+        self._line(40, "FEED", "%d%%" % ov)
+        d.rect(2, 49, 124, 5, FG); d.rect(3, 50, 122, 3, BG)
+        d.rect(3, 50, int(122 * min(max(ov, 0), 200) / 200), 3, FG)
+        d.rect(2 + int(122 * 0.5), 48, 1, 7, FG)        # 100% tick
+        # bottom bar: button hints
+        self._line(56, "X:resume Z:stop" if self.held else "X:hold  Z:stop", inv=True)
