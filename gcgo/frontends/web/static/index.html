@@ -52,16 +52,19 @@
         <button onclick="jog('Z','-')" title="Z-">Z↓</button>
       </div>
       <div class="jogset">
-        <div>
-          <div class="lbl" style="color:var(--mut);font-size:.72rem;margin-bottom:.25rem">STEP (mm)</div>
-          <div class="seg" id="stepseg">
+        <div class="jcol">
+          <div class="lbl">STEP mm</div>
+          <div class="segv" id="stepseg">
             <button data-step="0.1">0.1</button>
             <button data-step="1" class="on">1</button>
             <button data-step="10">10</button>
             <button data-step="100">100</button>
           </div>
         </div>
-        <div class="fld">Feed <input type="number" id="jogfeed" value="1000" min="1" step="50"> mm/min</div>
+        <div class="jcol">
+          <div class="lbl">FEED mm/min</div>
+          <input type="number" id="jogfeed" value="1000" min="1" step="50">
+        </div>
       </div>
     </div>
     <div class="jogfoot">
