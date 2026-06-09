@@ -71,10 +71,10 @@
         gap:.4rem; }
   .pad button{ padding:0; font-size:1.1rem; display:flex; align-items:center; justify-content:center; }
   .padspacer{ } /* empty center cell — home moved out to its own isolated row */
-  .jogfoot{ display:flex; align-items:center; gap:.8rem; margin-top:.9rem; padding-top:.8rem;
-            border-top:1px solid var(--line); }
-  .jogfoot .hint{ flex:1; }
-  .jogfoot button{ padding:.55rem 1.3rem; }
+  .jogfoot{ display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; margin-top:.9rem;
+            padding-top:.8rem; border-top:1px solid var(--line); }
+  .jogfoot .zlbl{ color:var(--mut); font-size:.82rem; margin-right:.3rem; }
+  .jogfoot button{ padding:.5rem .85rem; min-width:2.6rem; }
   .zcol{ display:grid; grid-template-rows:repeat(3,3rem); gap:.4rem; width:3rem; }
   .jogset{ flex:1; min-width:11rem; display:flex; flex-direction:column; gap:.55rem; }
   .seg{ display:flex; gap:.3rem; flex-wrap:wrap; }
@@ -200,19 +200,12 @@
       </div>
     </div>
     <div class="jogfoot">
-      <span class="hint">Homing moves the machine to its limit switches</span>
-      <button class="accent" onclick="mdi('$H')">⌂ Home</button>
-    </div>
-  </div>
-
-  <!-- ZEROING -->
-  <div class="card">
-    <h2>Work Zero</h2>
-    <div class="row">
-      <button onclick="zero('X')">Zero X</button>
-      <button onclick="zero('Y')">Zero Y</button>
-      <button onclick="zero('Z')">Zero Z</button>
-      <button class="accent" onclick="zero('X','Y','Z')">Zero All</button>
+      <span class="zlbl">Work Zero</span>
+      <button onclick="zero('X')">X</button>
+      <button onclick="zero('Y')">Y</button>
+      <button onclick="zero('Z')">Z</button>
+      <button class="accent" onclick="zero('X','Y','Z')">All</button>
+      <span class="spacer"></span>
       <button onclick="send({cmd:'mdi',line:'G90 G0 X0 Y0'})">Go to XY0</button>
     </div>
   </div>
@@ -244,6 +237,7 @@
   <div class="card">
     <h2>Machine</h2>
     <div class="ctrlgrid">
+      <button class="accent" onclick="mdi('$H')">⌂ Home</button>
       <button onclick="mdi('$X')">Unlock</button>
       <button class="warn" onclick="send({cmd:'rt',action:'hold'})">Hold</button>
       <button class="grn" onclick="send({cmd:'rt',action:'resume'})">Resume</button>
