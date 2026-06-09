@@ -137,6 +137,17 @@ class WebServer:
             "loaded": self.loaded,
         }
 
+    def settings_obj(self):
+        return {"type": "settings", "units": self.cfg.units,
+                "rate": self.cfg.rate, "after": self.cfg.after}
+
+    def _save_cfg(self):
+        if self.config_file:
+            try:
+                self.cfg.save(self.config_file)
+            except OSError:
+                pass
+
     def list_dir(self, subdir=""):
         rel = _safe_rel(subdir)
         if rel is None:
@@ -180,12 +191,24 @@ class WebServer:
             v = cmd.get("value")
             if v in ("mm", "inch"):
                 self.cfg.units = v
-                if self.config_file:
-                    try:
-                        self.cfg.save(self.config_file)
-                    except OSError:
-                        pass
+                self._save_cfg()
                 self._apply_units()
+                self.broadcast(self.settings_obj())
+        elif c == "rate":
+            try:
+                r = float(cmd.get("value"))
+            except (TypeError, ValueError):
+                r = None
+            if r is not None and 0 <= r <= 10:
+                self.cfg.rate = r
+                self._save_cfg()
+                self.broadcast(self.settings_obj())
+        elif c == "after":
+            v = cmd.get("value")
+            if v in ("keep", "clear"):
+                self.cfg.after = v
+                self._save_cfg()
+                self.broadcast(self.settings_obj())
         elif c == "files":
             self.broadcast(self.list_dir(cmd.get("dir", "")))
 
@@ -224,7 +247,6 @@ class WebServer:
     # --- the single driver task ---
 
     async def driver(self):
-        poll_ms = int((self.cfg.rate or 1.0) * 1000)
         poll_at = 0
         bcast_at = 0
         while True:
@@ -233,10 +255,14 @@ class WebServer:
                     st = self.s.state
                     if st != "done" and self.s.sent_any:
                         self.s.request_cancel()
+                    elif st == "done" and self.cfg.after == "clear":
+                        self.loaded = None
                     self.broadcast({"type": "msg",
                                     "line": "stream %s (%d lines)" % (st, self.s.sent)})
             else:
                 self.s.service()
+                # poll interval tracks cfg.rate so a settings change takes effect live
+                poll_ms = int((self.cfg.rate or 1.0) * 1000)
                 if diff_ms(now_ms(), poll_at) >= 0:
                     self.s.request_status()
                     poll_at = now_ms() + poll_ms
@@ -413,7 +439,7 @@ class WebServer:
         await writer.drain()
         self.clients.append(writer)
         # prime the new client
-        for obj in (self.list_dir(""), self.status_obj()):
+        for obj in (self.settings_obj(), self.list_dir(""), self.status_obj()):
             writer.write(wsproto.encode_text(json.dumps(obj)))
         await writer.drain()
         try:

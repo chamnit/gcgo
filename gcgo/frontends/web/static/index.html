@@ -5,79 +5,281 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gcgo</title>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: ui-monospace, monospace; margin: 0; background:#14171c; color:#d8dee9; }
-  header { padding:.6rem 1rem; background:#1c2128; font-weight:bold; letter-spacing:.05em; }
-  #state { float:right; padding:0 .5rem; border-radius:.3rem; background:#3b4252; }
-  .wrap { padding: 1rem; max-width: 720px; }
-  .grid { display:grid; grid-template-columns:auto 1fr; gap:.2rem 1rem; margin:.5rem 0; }
-  .grid div:nth-child(odd){ color:#8893a3; }
-  .num { font-variant-numeric: tabular-nums; }
-  progress { width:100%; height:1rem; }
-  button, label.btn { font:inherit; background:#2e3440; color:#d8dee9; border:1px solid #434c5e;
-           border-radius:.3rem; padding:.4rem .6rem; cursor:pointer; }
-  button:hover, label.btn:hover { background:#3b4252; }
-  .row { display:flex; gap:.4rem; flex-wrap:wrap; margin:.4rem 0; align-items:center; }
-  input[type=text]{ flex:1; font:inherit; background:#2e3440; color:#d8dee9;
-                    border:1px solid #434c5e; border-radius:.3rem; padding:.35rem; }
-  #files { background:#0f1216; border:1px solid #2e3440; border-radius:.3rem;
-           max-height:13rem; overflow:auto; margin:.3rem 0; }
-  .entry { padding:.35rem .6rem; cursor:pointer; border-bottom:1px solid #1c2128; }
-  .entry:hover { background:#222831; }
-  .entry.sel { background:#3b4252; }
-  .entry.dir { color:#88c0d0; }
-  #cwd { color:#8893a3; }
-  #log { background:#0f1216; border:1px solid #2e3440; border-radius:.3rem; height:9rem;
-         overflow:auto; padding:.4rem; white-space:pre-wrap; font-size:.85rem; }
-  .ALARM,.Hold,.Door { background:#bf616a !important; }
-  .Run { background:#a3be8c !important; color:#14171c; }
-  .Idle { background:#5e81ac !important; }
+  :root{
+    color-scheme: dark;
+    --bg:#0f1216; --panel:#171b22; --panel2:#1d222b; --line:#2a313c;
+    --txt:#e3e8f0; --mut:#8893a3; --accent:#88c0d0; --accent2:#5e81ac;
+    --grn:#a3be8c; --red:#bf616a; --yel:#ebcb8b; --vio:#b48ead;
+    --r:.55rem;
+  }
+  *{ box-sizing:border-box; }
+  body{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; margin:0;
+        background:var(--bg); color:var(--txt); font-size:14px; }
+  header{ display:flex; align-items:center; gap:.6rem; padding:.7rem 1rem;
+          background:linear-gradient(180deg,#1b212b,#141820); border-bottom:1px solid var(--line);
+          position:sticky; top:0; z-index:5; }
+  .brand{ font-weight:700; letter-spacing:.12em; font-size:1.1rem; }
+  .brand b{ color:var(--accent); }
+  .spacer{ flex:1; }
+  .badge{ padding:.28rem .7rem; border-radius:2rem; font-weight:700; font-size:.8rem;
+          letter-spacing:.06em; background:#3b4252; color:#cfd6e1; border:1px solid var(--line);
+          text-transform:uppercase; }
+  .badge.Idle{ background:#2c4256; color:#bcd9ef; border-color:#3a6285; }
+  .badge.Run{ background:#33401f; color:#cde8a6; border-color:#5a7a2f; }
+  .badge.Hold,.badge.Door{ background:#4a3a18; color:#f0d69a; border-color:#806326; }
+  .badge.Alarm{ background:#4a2226; color:#f3b0b6; border-color:#8a363c; }
+  .badge.offline{ background:#262a31; color:#7c8794; }
+
+  .wrap{ max-width:760px; margin:0 auto; padding:.9rem; display:flex;
+         flex-direction:column; gap:.9rem; }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+         padding:.85rem; }
+  .card h2{ margin:0 0 .65rem; font-size:.72rem; letter-spacing:.14em; text-transform:uppercase;
+            color:var(--mut); font-weight:700; display:flex; align-items:center; gap:.5rem; }
+  .card h2 .sub{ font-weight:400; letter-spacing:0; text-transform:none; color:var(--mut);
+                 margin-left:auto; font-size:.78rem; }
+
+  /* DRO */
+  .dro{ display:grid; grid-template-columns:repeat(3,1fr); gap:.6rem; }
+  .axis{ background:var(--panel2); border:1px solid var(--line); border-radius:var(--r);
+         padding:.5rem .65rem; }
+  .axis .lbl{ color:var(--mut); font-size:.72rem; letter-spacing:.1em; }
+  .axis .wco{ font-variant-numeric:tabular-nums; font-size:1.7rem; font-weight:700;
+              line-height:1.15; color:var(--txt); }
+  .axis .mco{ font-variant-numeric:tabular-nums; font-size:.78rem; color:var(--mut); }
+  .stats{ display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.65rem; }
+  .chip{ background:var(--panel2); border:1px solid var(--line); border-radius:2rem;
+         padding:.25rem .65rem; font-size:.78rem; color:var(--mut); }
+  .chip b{ color:var(--txt); font-weight:600; font-variant-numeric:tabular-nums; }
+
+  /* generic buttons */
+  button{ font:inherit; background:var(--panel2); color:var(--txt); border:1px solid var(--line);
+          border-radius:.4rem; padding:.5rem .7rem; cursor:pointer; transition:.08s; }
+  button:hover{ background:#283041; border-color:#3a4150; }
+  button:active{ transform:translateY(1px); }
+  button.accent{ background:var(--accent2); border-color:#6f93bd; color:#eaf2fb; }
+  button.accent:hover{ background:#6b8fbb; }
+  button.grn{ background:#3a5a2a; border-color:#557a3c; color:#e7f3d8; }
+  button.red{ background:#5a2a30; border-color:#7c3a42; color:#f5d6da; }
+  button.warn{ background:#5a4720; border-color:#7c632e; color:#f3e3bd; }
+  button:disabled{ opacity:.4; cursor:not-allowed; }
+  .row{ display:flex; gap:.45rem; flex-wrap:wrap; align-items:center; }
+
+  /* jog */
+  .jogwrap{ display:flex; gap:1rem; flex-wrap:wrap; align-items:center; }
+  .pad{ display:grid; grid-template-columns:repeat(3,3rem); grid-template-rows:repeat(3,3rem);
+        gap:.4rem; }
+  .pad button{ padding:0; font-size:1.1rem; display:flex; align-items:center; justify-content:center; }
+  .pad .home{ font-size:.7rem; }
+  .zcol{ display:grid; grid-template-rows:repeat(3,3rem); gap:.4rem; width:3rem; }
+  .jogset{ flex:1; min-width:11rem; display:flex; flex-direction:column; gap:.55rem; }
+  .seg{ display:flex; gap:.3rem; flex-wrap:wrap; }
+  .seg button{ flex:1; min-width:2.6rem; padding:.4rem .2rem; font-size:.82rem; }
+  .seg button.on{ background:var(--accent2); border-color:#6f93bd; color:#eaf2fb; }
+  .fld{ display:flex; align-items:center; gap:.5rem; color:var(--mut); font-size:.82rem; }
+  .fld input{ width:5.5rem; }
+
+  input[type=text],input[type=number]{ font:inherit; background:var(--panel2); color:var(--txt);
+        border:1px solid var(--line); border-radius:.4rem; padding:.45rem .55rem; }
+  input:focus{ outline:none; border-color:var(--accent2); }
+
+  /* files */
+  #cwd{ color:var(--accent); }
+  #files{ background:var(--bg); border:1px solid var(--line); border-radius:.45rem;
+          max-height:12rem; overflow:auto; margin:.55rem 0; }
+  .entry{ padding:.45rem .6rem; cursor:pointer; display:flex; align-items:center; gap:.55rem;
+          border-bottom:1px solid #20262f; }
+  .entry:last-child{ border-bottom:none; }
+  .entry:hover{ background:var(--panel2); }
+  .entry.sel{ background:#2c3a4d; }
+  .entry .ic{ width:1rem; height:1rem; flex:none; color:var(--mut); }
+  .entry.dir .ic{ color:var(--accent); }
+  .entry.dir{ color:#bfe0ec; }
+  progress{ width:100%; height:.7rem; border:none; border-radius:1rem; overflow:hidden;
+            background:var(--panel2); }
+  progress::-webkit-progress-bar{ background:var(--panel2); }
+  progress::-webkit-progress-value{ background:var(--grn); }
+  progress::-moz-progress-bar{ background:var(--grn); }
+  #progtxt{ color:var(--mut); font-size:.8rem; margin-top:.3rem; font-variant-numeric:tabular-nums; }
+
+  /* console */
+  #log{ background:#0b0e12; border:1px solid var(--line); border-radius:.45rem; height:11rem;
+        overflow:auto; padding:.5rem .6rem; white-space:pre-wrap; font-size:.82rem; line-height:1.5; }
+  #log .tx{ color:var(--accent); }
+  #log .rx{ color:#b9c2d0; }
+  #log .err{ color:var(--red); }
+  #log .sys{ color:var(--mut); font-style:italic; }
+  .console-in{ display:flex; gap:.45rem; margin-top:.55rem; }
+  .console-in input{ flex:1; }
+  .quick{ margin-top:.5rem; }
+  .quick button{ font-size:.8rem; padding:.35rem .55rem; }
+
+  label.btn{ font:inherit; background:var(--panel2); color:var(--txt); border:1px solid var(--line);
+             border-radius:.4rem; padding:.5rem .7rem; cursor:pointer; }
+  label.btn:hover{ background:#283041; }
+
+  /* settings */
+  .settings{ display:flex; flex-direction:column; gap:.7rem; }
+  .setrow{ display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; }
+  .setlbl{ width:7rem; color:var(--mut); font-size:.82rem; }
+  .setrow .seg{ flex:0 0 auto; }
+  .setrow .seg button{ min-width:4.5rem; flex:0 0 auto; }
+  .hint{ color:var(--mut); font-size:.75rem; }
 </style>
 </head>
 <body>
-<header>gcgo<span id="state">—</span></header>
+<header>
+  <span class="brand"><b>gc</b>go</span>
+  <span class="spacer"></span>
+  <span id="state" class="badge offline">offline</span>
+</header>
+
 <div class="wrap">
-  <div class="grid">
-    <div>Work</div>   <div class="num" id="wpos">—</div>
-    <div>Machine</div><div class="num" id="mpos">—</div>
-    <div>Feed</div>   <div class="num" id="feed">—</div>
-    <div>Spindle</div><div class="num" id="spindle">—</div>
-    <div>Override</div><div class="num" id="ov">—</div>
-    <div>Pins</div>   <div class="num" id="pins">—</div>
+
+  <!-- DRO -->
+  <div class="card">
+    <h2>Position <span class="sub" id="unitlbl">mm</span></h2>
+    <div class="dro">
+      <div class="axis"><div class="lbl">X work</div><div class="wco" id="wx">0.000</div><div class="mco" id="mx">M 0.000</div></div>
+      <div class="axis"><div class="lbl">Y work</div><div class="wco" id="wy">0.000</div><div class="mco" id="my">M 0.000</div></div>
+      <div class="axis"><div class="lbl">Z work</div><div class="wco" id="wz">0.000</div><div class="mco" id="mz">M 0.000</div></div>
+    </div>
+    <div class="stats">
+      <span class="chip">Feed <b id="feed">0</b></span>
+      <span class="chip">Spindle <b id="spindle">0</b></span>
+      <span class="chip">Ovr <b id="ov">100/100/100</b></span>
+      <span class="chip">Pins <b id="pins">-</b></span>
+    </div>
   </div>
 
-  <div class="row">
-    <span id="cwd">/</span>
-    <button onclick="upDir()">⬆ up</button>
-    <button onclick="refresh()">⟳</button>
-    <label class="btn">⬆ Upload<input type="file" id="upl" multiple onchange="upload(this)" hidden></label>
+  <!-- JOG -->
+  <div class="card">
+    <h2>Jog</h2>
+    <div class="jogwrap">
+      <div class="pad">
+        <button onclick="jog('X','-','Y','+')" title="X- Y+">↖</button>
+        <button onclick="jog('Y','+')" title="Y+">↑</button>
+        <button onclick="jog('X','+','Y','+')" title="X+ Y+">↗</button>
+        <button onclick="jog('X','-')" title="X-">←</button>
+        <button class="home" onclick="send({cmd:'mdi',line:'$H'})" title="Home">⌂</button>
+        <button onclick="jog('X','+')" title="X+">→</button>
+        <button onclick="jog('X','-','Y','-')" title="X- Y-">↙</button>
+        <button onclick="jog('Y','-')" title="Y-">↓</button>
+        <button onclick="jog('X','+','Y','-')" title="X+ Y-">↘</button>
+      </div>
+      <div class="zcol">
+        <button onclick="jog('Z','+')" title="Z+">Z↑</button>
+        <button disabled>Z</button>
+        <button onclick="jog('Z','-')" title="Z-">Z↓</button>
+      </div>
+      <div class="jogset">
+        <div>
+          <div class="lbl" style="color:var(--mut);font-size:.72rem;margin-bottom:.25rem">STEP (mm)</div>
+          <div class="seg" id="stepseg">
+            <button data-step="0.1">0.1</button>
+            <button data-step="1" class="on">1</button>
+            <button data-step="10">10</button>
+            <button data-step="100">100</button>
+          </div>
+        </div>
+        <div class="fld">Feed <input type="number" id="jogfeed" value="1000" min="1" step="50"> mm/min</div>
+      </div>
+    </div>
   </div>
-  <div id="files"></div>
-  <div class="row">
-    <span id="sel" class="num">no file selected</span>
-    <button onclick="runSel()">Run</button>
-    <button onclick="send({cmd:'stop'})">Stop</button>
-    <button onclick="dlSel()">Download</button>
-    <button onclick="delSel()">Delete</button>
-  </div>
-  <progress id="prog" value="0" max="1"></progress>
-  <div id="progtxt" class="num">idle</div>
 
-  <div class="row">
-    <button onclick="send({cmd:'rt',action:'hold'})">Hold !</button>
-    <button onclick="send({cmd:'rt',action:'resume'})">Resume ~</button>
-    <button onclick="send({cmd:'rt',action:'feed_down'})">Feed −10%</button>
-    <button onclick="send({cmd:'rt',action:'feed_reset'})">Feed 100%</button>
-    <button onclick="send({cmd:'rt',action:'feed_up'})">Feed +10%</button>
-    <button onclick="send({cmd:'reset'})">Reset</button>
+  <!-- ZEROING -->
+  <div class="card">
+    <h2>Work Zero</h2>
+    <div class="row">
+      <button onclick="zero('X')">Zero X</button>
+      <button onclick="zero('Y')">Zero Y</button>
+      <button onclick="zero('Z')">Zero Z</button>
+      <button class="accent" onclick="zero('X','Y','Z')">Zero All</button>
+      <button onclick="send({cmd:'mdi',line:'G90 G0 X0 Y0'})">Go to XY0</button>
+    </div>
   </div>
 
-  <div class="row">
-    <input type="text" id="mdi" placeholder="MDI command (e.g. $X, G90) — Enter to send"
-           onkeydown="if(event.key==='Enter'){send({cmd:'mdi',line:this.value});this.value='';}">
+  <!-- JOB / FILES -->
+  <div class="card">
+    <h2>Job
+      <span class="sub"><span id="cwd">/</span></span>
+    </h2>
+    <div class="row" style="margin-bottom:.2rem">
+      <button onclick="upDir()">⬆ Up</button>
+      <button onclick="refresh()">⟳ Refresh</button>
+      <label class="btn">⬆ Upload<input type="file" id="upl" multiple onchange="upload(this)" hidden></label>
+    </div>
+    <div id="files"></div>
+    <div class="row">
+      <span id="sel" style="color:var(--mut)">no file selected</span>
+      <span class="spacer"></span>
+      <button class="grn" onclick="runSel()">▶ Run</button>
+      <button class="red" onclick="send({cmd:'stop'})">■ Stop</button>
+      <button onclick="dlSel()">Download</button>
+      <button onclick="delSel()">Delete</button>
+    </div>
+    <progress id="prog" value="0" max="1" style="margin-top:.6rem"></progress>
+    <div id="progtxt">idle</div>
   </div>
 
-  <div id="log"></div>
+  <!-- OVERRIDES / MACHINE -->
+  <div class="card">
+    <h2>Machine</h2>
+    <div class="row">
+      <button class="warn" onclick="send({cmd:'rt',action:'hold'})">Hold</button>
+      <button class="grn" onclick="send({cmd:'rt',action:'resume'})">Resume</button>
+      <button onclick="send({cmd:'rt',action:'feed_down'})">Feed −10%</button>
+      <button onclick="send({cmd:'rt',action:'feed_reset'})">Feed 100%</button>
+      <button onclick="send({cmd:'rt',action:'feed_up'})">Feed +10%</button>
+      <button class="red" onclick="send({cmd:'reset'})">⟲ Reset</button>
+    </div>
+  </div>
+
+  <!-- CONSOLE -->
+  <div class="card">
+    <h2>Console</h2>
+    <div id="log"></div>
+    <div class="quick row">
+      <button onclick="mdi('$X')">$X Unlock</button>
+      <button onclick="mdi('$H')">$H Home</button>
+      <button onclick="mdi('$$')">$$ Settings</button>
+      <button onclick="mdi('?')">? Status</button>
+      <button onclick="$('log').textContent=''">Clear</button>
+    </div>
+    <div class="console-in">
+      <input type="text" id="mdiin" placeholder="MDI command (e.g. G0 X10, $X) — Enter to send"
+             onkeydown="if(event.key==='Enter'){mdi(this.value);this.value='';}">
+      <button class="accent" onclick="var i=$('mdiin');mdi(i.value);i.value='';">Send</button>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="card">
+    <h2>Settings</h2>
+    <div class="settings">
+      <div class="setrow">
+        <span class="setlbl">Units</span>
+        <div class="seg" id="unitseg">
+          <button data-units="mm">mm</button>
+          <button data-units="inch">inch</button>
+        </div>
+      </div>
+      <div class="setrow">
+        <span class="setlbl">Status poll</span>
+        <div class="fld"><input type="number" id="rateinp" value="0.5" min="0" max="10" step="0.1"
+                                onchange="send({cmd:'rate',value:parseFloat(this.value)})"> s
+          <span class="hint">(0 = off)</span></div>
+      </div>
+      <div class="setrow">
+        <span class="setlbl">After run</span>
+        <div class="seg" id="afterseg">
+          <button data-after="keep">Keep file</button>
+          <button data-after="clear">Unload file</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div>
 <script src="/app.js"></script>
 </body>
