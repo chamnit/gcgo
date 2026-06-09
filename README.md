@@ -135,11 +135,14 @@ size isn't limited by memory — put jobs on an SD card or flash.
 
 ### Headless web pendant (Pico W)
 
-A WiFi board can serve a browser UI (live status, file run/stop, feed
-overrides, MDI) with no display or keyboard — the whole stack is a dependency-
-free `uasyncio` HTTP + WebSocket server sharing the same core. Verified on a
-Raspberry Pi Pico W with GRBL on UART0 (GP16/17) and a hardware reset line on
-GP18, through level shifters:
+A WiFi board can serve a browser UI with no display or keyboard: live DRO,
+jog pad with selectable step/feed, work-zero, all feed/rapid/spindle
+overrides and coolant toggles, a sent/received console with MDI, file
+management (browse, make folders, upload, download, run/stop, delete), and a
+separate settings page (units, poll rate, after-run, which override groups to
+show). The whole stack is a dependency-free `uasyncio` HTTP + WebSocket server
+sharing the same core. Verified on a Raspberry Pi Pico W with GRBL on UART0
+(GP16/17) and a hardware reset line on GP18, through level shifters:
 
 ```
 mpremote connect /dev/ttyACM0 cp -r gcgo :
@@ -154,9 +157,18 @@ the identical UI via `python -m gcgo.desktop.webmain <port>`.
 UART — don't drive the board from USB and the Pico's UART at once (bus
 contention). Use one at a time.
 
+**Boards:** developed and verified on the **Pico W** (RP2040). The **Pico 2 W**
+(RP2350) is pin-compatible and uses the same CYW43439 WiFi chip, so the wiring
+and the deploy steps above are unchanged — just flash the Pico 2 W MicroPython
+build. It has more SRAM (≈520 KB vs 264 KB), so even more headroom. The code
+uses no pulled-down GPIO inputs, so the RP2350 input-pulldown erratum (E9)
+doesn't apply to this wiring. Any MicroPython board with WiFi, a UART, and
+`asyncio` (e.g. ESP32) should work; pass board-specific UART/pins to `start()`.
+
 ## Requirements
 
 - Python 3.11+ and `pyserial` (desktop), or MicroPython 1.2x (board)
+- For the web pendant: a WiFi MicroPython board (Pico W or Pico 2 W; ESP32 also works)
 - A GRBL 1.1 controller (e.g. an Arduino running GRBL)
 
 ## License
