@@ -97,10 +97,66 @@ Units note: gcgo owns GRBL's `$13` (report units) so displayed values always
 match their labels — it sets `$13` on connect to match `config units` and
 re-asserts it if you change `$13` in MDI.
 
+## Architecture
+
+gcgo is split so the GRBL "brain" is shared across platforms:
+
+- `gcgo/core/` — platform-agnostic logic (protocol/streaming pump, status,
+  config, gcode, clock). No platform imports; runs on CPython and MicroPython.
+- `gcgo/ports/` — adapter contracts (e.g. the byte-level `Transport`).
+- `gcgo/desktop/` — CPython adapters: pyserial transport, terminal display,
+  termios/readline keyboard, paths.
+- `gcgo/frontends/` — front-ends that drive the core (terminal today).
+- `gcgo/micropython/` — `machine.UART` transport + a minimal serial-console
+  front-end.
+
+Streaming is a single-threaded non-blocking `pump()`, so the same core drops
+into a desktop loop or an MCU loop unchanged.
+
+## MicroPython (experimental)
+
+gcgo's core runs on MicroPython 1.2x. A board can act as a standalone GRBL
+sender: it talks to the GRBL controller over a UART and gives you a serial
+console.
+
+Deploy and run (using [mpremote](https://docs.micropython.org/en/latest/reference/mpremote.html)):
+
+```
+mpremote connect /dev/ttyACM0 cp -r gcgo :        # copy the package to the board
+mpremote connect /dev/ttyACM0 exec "from gcgo.micropython.main import start; start(uart_id=1, baud=115200)"
+```
+
+`uart_id`/pins are board-specific — pass what your board needs (e.g.
+`start(1, tx=4, rx=5)` on many ESP32s). Wire the board's UART TX/RX/GND to the
+GRBL controller's serial pins.
+
+G-code is streamed from a file on demand (nothing is loaded into RAM), so file
+size isn't limited by memory — put jobs on an SD card or flash.
+
+### Headless web pendant (Pico W)
+
+A WiFi board can serve a browser UI (live status, file run/stop, feed
+overrides, MDI) with no display or keyboard — the whole stack is a dependency-
+free `uasyncio` HTTP + WebSocket server sharing the same core. Verified on a
+Raspberry Pi Pico W with GRBL on UART0 (GP16/17) and a hardware reset line on
+GP18, through level shifters:
+
+```
+mpremote connect /dev/ttyACM0 cp -r gcgo :
+# put WIFI_SSID / WIFI_PASS in a secrets.py on the board, then:
+mpremote connect /dev/ttyACM0 exec "from gcgo.micropython.webmain import start; start()"
+```
+
+It prints the board's IP; open `http://<board-ip>/`. The desktop build serves
+the identical UI via `python -m gcgo.desktop.webmain <port>`.
+
+**Wiring note:** on an ATmega Arduino, the USB port and pins 0/1 are the same
+UART — don't drive the board from USB and the Pico's UART at once (bus
+contention). Use one at a time.
+
 ## Requirements
 
-- Python 3.11+
-- `pyserial`
+- Python 3.11+ and `pyserial` (desktop), or MicroPython 1.2x (board)
 - A GRBL 1.1 controller (e.g. an Arduino running GRBL)
 
 ## License

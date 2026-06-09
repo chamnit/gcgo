@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gcgo</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-monospace, monospace; margin: 0; background:#14171c; color:#d8dee9; }
+  header { padding:.6rem 1rem; background:#1c2128; font-weight:bold; letter-spacing:.05em; }
+  #state { float:right; padding:0 .5rem; border-radius:.3rem; background:#3b4252; }
+  .wrap { padding: 1rem; max-width: 720px; }
+  .grid { display:grid; grid-template-columns:auto 1fr; gap:.2rem 1rem; margin:.5rem 0; }
+  .grid div:nth-child(odd){ color:#8893a3; }
+  .num { font-variant-numeric: tabular-nums; }
+  progress { width:100%; height:1rem; }
+  button, label.btn { font:inherit; background:#2e3440; color:#d8dee9; border:1px solid #434c5e;
+           border-radius:.3rem; padding:.4rem .6rem; cursor:pointer; }
+  button:hover, label.btn:hover { background:#3b4252; }
+  .row { display:flex; gap:.4rem; flex-wrap:wrap; margin:.4rem 0; align-items:center; }
+  input[type=text]{ flex:1; font:inherit; background:#2e3440; color:#d8dee9;
+                    border:1px solid #434c5e; border-radius:.3rem; padding:.35rem; }
+  #files { background:#0f1216; border:1px solid #2e3440; border-radius:.3rem;
+           max-height:13rem; overflow:auto; margin:.3rem 0; }
+  .entry { padding:.35rem .6rem; cursor:pointer; border-bottom:1px solid #1c2128; }
+  .entry:hover { background:#222831; }
+  .entry.sel { background:#3b4252; }
+  .entry.dir { color:#88c0d0; }
+  #cwd { color:#8893a3; }
+  #log { background:#0f1216; border:1px solid #2e3440; border-radius:.3rem; height:9rem;
+         overflow:auto; padding:.4rem; white-space:pre-wrap; font-size:.85rem; }
+  .ALARM,.Hold,.Door { background:#bf616a !important; }
+  .Run { background:#a3be8c !important; color:#14171c; }
+  .Idle { background:#5e81ac !important; }
+</style>
+</head>
+<body>
+<header>gcgo<span id="state">—</span></header>
+<div class="wrap">
+  <div class="grid">
+    <div>Work</div>   <div class="num" id="wpos">—</div>
+    <div>Machine</div><div class="num" id="mpos">—</div>
+    <div>Feed</div>   <div class="num" id="feed">—</div>
+    <div>Spindle</div><div class="num" id="spindle">—</div>
+    <div>Override</div><div class="num" id="ov">—</div>
+    <div>Pins</div>   <div class="num" id="pins">—</div>
+  </div>
+
+  <div class="row">
+    <span id="cwd">/</span>
+    <button onclick="upDir()">⬆ up</button>
+    <button onclick="refresh()">⟳</button>
+    <label class="btn">⬆ Upload<input type="file" id="upl" multiple onchange="upload(this)" hidden></label>
+  </div>
+  <div id="files"></div>
+  <div class="row">
+    <span id="sel" class="num">no file selected</span>
+    <button onclick="runSel()">Run</button>
+    <button onclick="send({cmd:'stop'})">Stop</button>
+    <button onclick="dlSel()">Download</button>
+    <button onclick="delSel()">Delete</button>
+  </div>
+  <progress id="prog" value="0" max="1"></progress>
+  <div id="progtxt" class="num">idle</div>
+
+  <div class="row">
+    <button onclick="send({cmd:'rt',action:'hold'})">Hold !</button>
+    <button onclick="send({cmd:'rt',action:'resume'})">Resume ~</button>
+    <button onclick="send({cmd:'rt',action:'feed_down'})">Feed −10%</button>
+    <button onclick="send({cmd:'rt',action:'feed_reset'})">Feed 100%</button>
+    <button onclick="send({cmd:'rt',action:'feed_up'})">Feed +10%</button>
+    <button onclick="send({cmd:'reset'})">Reset</button>
+  </div>
+
+  <div class="row">
+    <input type="text" id="mdi" placeholder="MDI command (e.g. $X, G90) — Enter to send"
+           onkeydown="if(event.key==='Enter'){send({cmd:'mdi',line:this.value});this.value='';}">
+  </div>
+
+  <div id="log"></div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

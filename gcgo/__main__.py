@@ -1,3 +1,3 @@
-from gcgo.cli import main
+from gcgo.desktop.main import main
 
 main()
