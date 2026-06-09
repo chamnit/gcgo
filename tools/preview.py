@@ -29,7 +29,7 @@ def mock_messages(state, nfiles=5):
         "mpos": [212.500, 195.750, -3.000],
         "feed": 800 if running else 0,
         "spindle": 12000 if running else 0,
-        "ov": [100, 100, 100],
+        "ov": [110, 50, 90] if running else [100, 100, 100],
         "pins": "",
         "stream": {
             "state": "running" if running else "idle",

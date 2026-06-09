@@ -29,6 +29,9 @@ function handle(m) {
     $("feed").textContent = m.feed.toFixed(0) + (u === "in" ? " in/m" : " mm/m");
     $("spindle").textContent = m.spindle.toFixed(0) + " rpm";
     $("ov").textContent = m.ov[0] + "/" + m.ov[1] + "/" + m.ov[2];
+    $("ovf").textContent = m.ov[0] + "%";
+    $("ovr").textContent = m.ov[1] + "%";
+    $("ovs").textContent = m.ov[2] + "%";
     $("pins").textContent = m.pins || "-";
     const st = m.stream;
     running = st.state === "running";
@@ -88,6 +91,9 @@ function renderFiles(entries) {
     box.appendChild(row);
   }
 }
+
+// --- machine / overrides ---
+function rt(action) { send({ cmd: "rt", action }); }
 
 // --- jog & zero ---
 function jog(...pairs) {

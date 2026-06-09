@@ -70,7 +70,11 @@
   .pad{ display:grid; grid-template-columns:repeat(3,3rem); grid-template-rows:repeat(3,3rem);
         gap:.4rem; }
   .pad button{ padding:0; font-size:1.1rem; display:flex; align-items:center; justify-content:center; }
-  .pad .home{ font-size:.7rem; }
+  .padspacer{ } /* empty center cell — home moved out to its own isolated row */
+  .jogfoot{ display:flex; align-items:center; gap:.8rem; margin-top:.9rem; padding-top:.8rem;
+            border-top:1px solid var(--line); }
+  .jogfoot .hint{ flex:1; }
+  .jogfoot button{ padding:.55rem 1.3rem; }
   .zcol{ display:grid; grid-template-rows:repeat(3,3rem); gap:.4rem; width:3rem; }
   .jogset{ flex:1; min-width:11rem; display:flex; flex-direction:column; gap:.55rem; }
   .seg{ display:flex; gap:.3rem; flex-wrap:wrap; }
@@ -118,6 +122,16 @@
              border-radius:.4rem; padding:.5rem .7rem; cursor:pointer; }
   label.btn:hover{ background:#283041; }
 
+  /* machine control + overrides */
+  .ctrlgrid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(6rem,1fr)); gap:.5rem; }
+  .ctrlgrid button{ padding:.65rem .5rem; font-size:.92rem; }
+  .ovr{ display:flex; flex-direction:column; gap:.55rem; }
+  .ovrrow{ display:flex; align-items:center; gap:.7rem; flex-wrap:wrap; }
+  .ovrlbl{ width:6.5rem; color:var(--mut); font-size:.82rem; flex:none; }
+  .ovrlbl b{ color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; }
+  .btngrp{ display:flex; gap:.35rem; flex:1; min-width:12rem; }
+  .btngrp button{ flex:1; min-width:2.4rem; padding:.45rem .2rem; font-size:.84rem; }
+
   /* settings */
   .settings{ display:flex; flex-direction:column; gap:.7rem; }
   .setrow{ display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; }
@@ -161,7 +175,7 @@
         <button onclick="jog('Y','+')" title="Y+">↑</button>
         <button onclick="jog('X','+','Y','+')" title="X+ Y+">↗</button>
         <button onclick="jog('X','-')" title="X-">←</button>
-        <button class="home" onclick="send({cmd:'mdi',line:'$H'})" title="Home">⌂</button>
+        <div class="padspacer"></div>
         <button onclick="jog('X','+')" title="X+">→</button>
         <button onclick="jog('X','-','Y','-')" title="X- Y-">↙</button>
         <button onclick="jog('Y','-')" title="Y-">↓</button>
@@ -184,6 +198,10 @@
         </div>
         <div class="fld">Feed <input type="number" id="jogfeed" value="1000" min="1" step="50"> mm/min</div>
       </div>
+    </div>
+    <div class="jogfoot">
+      <span class="hint">Homing moves the machine to its limit switches</span>
+      <button class="accent" onclick="mdi('$H')">⌂ Home</button>
     </div>
   </div>
 
@@ -222,16 +240,57 @@
     <div id="progtxt">idle</div>
   </div>
 
-  <!-- OVERRIDES / MACHINE -->
+  <!-- MACHINE CONTROL -->
   <div class="card">
     <h2>Machine</h2>
-    <div class="row">
+    <div class="ctrlgrid">
+      <button onclick="mdi('$X')">Unlock</button>
       <button class="warn" onclick="send({cmd:'rt',action:'hold'})">Hold</button>
       <button class="grn" onclick="send({cmd:'rt',action:'resume'})">Resume</button>
-      <button onclick="send({cmd:'rt',action:'feed_down'})">Feed −10%</button>
-      <button onclick="send({cmd:'rt',action:'feed_reset'})">Feed 100%</button>
-      <button onclick="send({cmd:'rt',action:'feed_up'})">Feed +10%</button>
       <button class="red" onclick="send({cmd:'reset'})">⟲ Reset</button>
+    </div>
+  </div>
+
+  <!-- OVERRIDES -->
+  <div class="card">
+    <h2>Overrides</h2>
+    <div class="ovr">
+      <div class="ovrrow">
+        <div class="ovrlbl">Feed <b id="ovf">100%</b></div>
+        <div class="btngrp">
+          <button onclick="rt('feed_down')">−10</button>
+          <button onclick="rt('feed_down1')">−1</button>
+          <button onclick="rt('feed_reset')">100%</button>
+          <button onclick="rt('feed_up1')">+1</button>
+          <button onclick="rt('feed_up')">+10</button>
+        </div>
+      </div>
+      <div class="ovrrow">
+        <div class="ovrlbl">Rapid <b id="ovr">100%</b></div>
+        <div class="btngrp">
+          <button onclick="rt('rapid_25')">25%</button>
+          <button onclick="rt('rapid_50')">50%</button>
+          <button onclick="rt('rapid_100')">100%</button>
+        </div>
+      </div>
+      <div class="ovrrow">
+        <div class="ovrlbl">Spindle <b id="ovs">100%</b></div>
+        <div class="btngrp">
+          <button onclick="rt('spindle_down')">−10</button>
+          <button onclick="rt('spindle_down1')">−1</button>
+          <button onclick="rt('spindle_reset')">100%</button>
+          <button onclick="rt('spindle_up1')">+1</button>
+          <button onclick="rt('spindle_up')">+10</button>
+        </div>
+      </div>
+      <div class="ovrrow">
+        <div class="ovrlbl">Toggles</div>
+        <div class="btngrp">
+          <button onclick="rt('spindle_stop')">Spindle Stop</button>
+          <button onclick="rt('flood')">Flood</button>
+          <button onclick="rt('mist')">Mist</button>
+        </div>
+      </div>
     </div>
   </div>
 
