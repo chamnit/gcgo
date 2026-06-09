@@ -128,6 +128,10 @@ function upDir() {
   send({ cmd: "files", dir: parent });
 }
 function refresh() { send({ cmd: "files", dir: curdir }); }
+function newDir() {
+  const name = prompt("New folder name:");
+  if (name && name.trim()) send({ cmd: "mkdir", dir: curdir, name: name.trim() });
+}
 function runSel() { if (sel) send({ cmd: "run", file: sel }); }
 function dlSel() { if (sel) window.location = "/dl?file=" + encodeURIComponent(sel); }
 function delSel() {

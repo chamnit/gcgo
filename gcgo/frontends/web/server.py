@@ -188,6 +188,8 @@ class WebServer:
             self.s.request_stop()
         elif c == "delete":
             self._delete(cmd.get("file", ""))
+        elif c == "mkdir":
+            self._mkdir(cmd.get("dir", ""), cmd.get("name", ""))
         elif c == "units":
             v = cmd.get("value")
             if v in ("mm", "inch"):
@@ -250,6 +252,21 @@ class WebServer:
         except OSError as e:
             self.broadcast({"type": "msg", "line": "delete failed: " + str(e)})
         self.broadcast(self.list_dir(rel.rsplit("/", 1)[0] if "/" in rel else ""))
+
+    def _mkdir(self, subdir, name):
+        import os
+        base = _safe_rel(subdir)
+        nm = _basename(name)
+        if base is None or not nm:
+            self.broadcast({"type": "msg", "line": "invalid folder name"})
+            return
+        rel = (base + "/" + nm) if base else nm
+        try:
+            os.mkdir(self.gdir + "/" + rel)
+            self.broadcast({"type": "msg", "line": "created folder " + rel})
+        except OSError as e:
+            self.broadcast({"type": "msg", "line": "mkdir failed: " + str(e)})
+        self.broadcast(self.list_dir(base or ""))
 
     # --- the single driver task ---
 
