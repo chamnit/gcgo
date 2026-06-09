@@ -71,13 +71,12 @@ button:disabled{ opacity:.4; cursor:not-allowed; }
 .pad button{ padding:0; font-size:1.1rem; display:flex; align-items:center; justify-content:center; }
 .padspacer{ } /* empty center cell — home lives in the Machine card */
 .zcol{ display:grid; grid-template-rows:repeat(3,3rem); gap:.4rem; width:3rem; }
-.jogset{ display:flex; gap:.7rem; }
+.padgroup{ display:flex; gap:.4rem; align-items:flex-start; }  /* keep Z flush with XY pad */
 .jcol{ display:flex; flex-direction:column; gap:.3rem; }
 .jcol .lbl{ color:var(--mut); font-size:.72rem; letter-spacing:.04em; }
 .jcol input{ width:5rem; }
 .zbtns{ display:flex; flex-direction:column; gap:.3rem; }
 .zbtns button{ min-width:3.6rem; padding:.35rem .9rem; font-size:.84rem; }
-.zerocol > button{ padding:.35rem .9rem; font-size:.82rem; }
 /* horizontal segmented (settings) and vertical segmented (jog step) */
 .seg{ display:flex; gap:.3rem; flex-wrap:wrap; }
 .seg button{ flex:1; min-width:2.6rem; padding:.4rem .2rem; font-size:.82rem; }

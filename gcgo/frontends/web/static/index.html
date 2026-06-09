@@ -35,36 +35,36 @@
   <div class="card">
     <h2>Jog</h2>
     <div class="jogwrap">
-      <div class="pad">
-        <button onclick="jog('X','-','Y','+')" title="X- Y+">↖</button>
-        <button onclick="jog('Y','+')" title="Y+">↑</button>
-        <button onclick="jog('X','+','Y','+')" title="X+ Y+">↗</button>
-        <button onclick="jog('X','-')" title="X-">←</button>
-        <div class="padspacer"></div>
-        <button onclick="jog('X','+')" title="X+">→</button>
-        <button onclick="jog('X','-','Y','-')" title="X- Y-">↙</button>
-        <button onclick="jog('Y','-')" title="Y-">↓</button>
-        <button onclick="jog('X','+','Y','-')" title="X+ Y-">↘</button>
-      </div>
-      <div class="zcol">
-        <button onclick="jog('Z','+')" title="Z+">Z↑</button>
-        <button disabled>Z</button>
-        <button onclick="jog('Z','-')" title="Z-">Z↓</button>
-      </div>
-      <div class="jogset">
-        <div class="jcol">
-          <div class="lbl">STEP mm</div>
-          <div class="segv" id="stepseg">
-            <button data-step="0.1">0.1</button>
-            <button data-step="1" class="on">1</button>
-            <button data-step="10">10</button>
-            <button data-step="100">100</button>
-          </div>
+      <div class="padgroup">
+        <div class="pad">
+          <button onclick="jog('X','-','Y','+')" title="X- Y+">↖</button>
+          <button onclick="jog('Y','+')" title="Y+">↑</button>
+          <button onclick="jog('X','+','Y','+')" title="X+ Y+">↗</button>
+          <button onclick="jog('X','-')" title="X-">←</button>
+          <div class="padspacer"></div>
+          <button onclick="jog('X','+')" title="X+">→</button>
+          <button onclick="jog('X','-','Y','-')" title="X- Y-">↙</button>
+          <button onclick="jog('Y','-')" title="Y-">↓</button>
+          <button onclick="jog('X','+','Y','-')" title="X+ Y-">↘</button>
         </div>
-        <div class="jcol">
-          <div class="lbl">FEED mm/min</div>
-          <input type="number" id="jogfeed" value="1000" min="1" step="50">
+        <div class="zcol">
+          <button onclick="jog('Z','+')" title="Z+">Z↑</button>
+          <button disabled>Z</button>
+          <button onclick="jog('Z','-')" title="Z-">Z↓</button>
         </div>
+      </div>
+      <div class="jcol">
+        <div class="lbl">STEP mm</div>
+        <div class="segv" id="stepseg">
+          <button data-step="0.1">0.1</button>
+          <button data-step="1" class="on">1</button>
+          <button data-step="10">10</button>
+          <button data-step="100">100</button>
+        </div>
+      </div>
+      <div class="jcol">
+        <div class="lbl">FEED mm/min</div>
+        <input type="number" id="jogfeed" value="1000" min="1" step="50">
       </div>
       <div class="jcol zerocol">
         <div class="lbl">WORK ZERO</div>
@@ -74,7 +74,6 @@
           <button onclick="zero('Z')">Z</button>
           <button class="accent" onclick="zero('X','Y','Z')">All</button>
         </div>
-        <button onclick="send({cmd:'mdi',line:'G90 G0 X0 Y0'})">Go to XY0</button>
       </div>
     </div>
   </div>
