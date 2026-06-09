@@ -306,21 +306,35 @@ class LocalUI:
         self._line(38, "click = START")
         self._line(50, "MENU  = cancel")
 
+    def _barpct(self, x, y, w, h, frac, label):
+        """Filled bar with a label centered inside it, drawn inverse over the
+        filled part so it stays readable across the fill edge (1-bit safe)."""
+        d = self.d
+        d.rect(x, y, w, h, FG)
+        d.rect(x + 1, y + 1, w - 2, h - 2, BG)
+        fillw = int((w - 2) * min(max(frac, 0.0), 1.0))
+        d.rect(x + 1, y + 1, fillw, h - 2, FG)
+        edge = x + 1 + fillw
+        tx = x + (w - len(label) * 8) // 2
+        ty = y + (h - 8) // 2
+        for i, ch in enumerate(label):           # per-char color by fill edge
+            cx = tx + i * 8
+            d.text(cx, ty, ch, BG if cx + 4 < edge else FG)
+
     def _screen_run(self):
         d = self.d
-        pct = int(self.s.progress * 100)
-        # top bar: state + job progress %
-        self._line(0, (self.s.status.state or "Run")[:8], "%d%%" % pct, inv=True)
+        # top bar: state + lines sent/total
+        self._line(0, (self.s.status.state or "Run")[:8],
+                   "%d/%d" % (self.s.sent, self.total), inv=True)
         self._line(10, (self.loaded or "")[:16])
-        # job progress bar + lines
-        d.rect(2, 20, 124, 7, FG); d.rect(3, 21, 122, 5, BG)
-        d.rect(3, 21, int(122 * self.s.progress), 5, FG)
-        self._line(30, "%d / %d" % (self.s.sent, self.total))
+        # progress bar with the % embedded
+        self._barpct(2, 20, 124, 12, self.s.progress,
+                     "%d%%" % int(self.s.progress * 100))
         # feed override: value + a bar with a tick at 100% (turn knob to change)
         ov = self.s.status.feed_ov
-        self._line(40, "FEED", "%d%%" % ov)
-        d.rect(2, 49, 124, 5, FG); d.rect(3, 50, 122, 3, BG)
-        d.rect(3, 50, int(122 * min(max(ov, 0), 200) / 200), 3, FG)
-        d.rect(2 + int(122 * 0.5), 48, 1, 7, FG)        # 100% tick
+        self._line(36, "FEED", "%d%%" % ov)
+        d.rect(2, 47, 124, 5, FG); d.rect(3, 48, 122, 3, BG)
+        d.rect(3, 48, int(122 * min(max(ov, 0), 200) / 200), 3, FG)
+        d.rect(2 + 61, 46, 1, 7, FG)             # 100% tick
         # bottom bar: button hints
         self._line(56, "X:resume Z:stop" if self.held else "X:hold  Z:stop", inv=True)
