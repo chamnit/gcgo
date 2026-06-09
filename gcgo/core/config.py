@@ -18,7 +18,7 @@ class StatusConfig:
 
     DEFAULT_RATE = 1.0       # seconds between '?' status polls; 0 disables
     DEFAULT_UNITS = "mm"     # "mm" or "inch"; gcgo owns GRBL's $13 to match
-    DEFAULT_AFTER = "keep"   # after a completed run: "keep" or "clear" the file
+    DEFAULT_AFTER = "clear"  # after a completed run: "keep" or "clear" the file
 
     # ordered (key, description, default) — order is the display order
     FIELDS = (
