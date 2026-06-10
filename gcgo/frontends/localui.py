@@ -322,19 +322,14 @@ class LocalUI:
             d.text(cx, ty, ch, BG if cx + 4 < edge else FG)
 
     def _screen_run(self):
-        d = self.d
-        # top bar: state + lines sent/total
-        self._line(0, (self.s.status.state or "Run")[:8],
-                   "%d/%d" % (self.s.sent, self.total), inv=True)
+        st = self.s.status
+        # header (not inverted): state + feed-override % (encoder feedback)
+        self._line(0, (st.state or "Run")[:8], "%d%%" % st.feed_ov)
         self._line(10, (self.loaded or "")[:16])
         # progress bar with the % embedded
-        self._barpct(2, 20, 124, 12, self.s.progress,
+        self._barpct(2, 22, 124, 12, self.s.progress,
                      "%d%%" % int(self.s.progress * 100))
-        # feed override: value + a bar with a tick at 100% (turn knob to change)
-        ov = self.s.status.feed_ov
-        self._line(36, "FEED", "%d%%" % ov)
-        d.rect(2, 47, 124, 5, FG); d.rect(3, 48, 122, 3, BG)
-        d.rect(3, 48, int(122 * min(max(ov, 0), 200) / 200), 3, FG)
-        d.rect(2 + 61, 46, 1, 7, FG)             # 100% tick
+        # live feed & spindle rates
+        self._line(40, "F%d" % int(st.feed), "S%d" % int(st.spindle))
         # bottom bar: button hints
         self._line(56, "X:resume Z:stop" if self.held else "X:hold  Z:stop", inv=True)

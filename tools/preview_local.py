@@ -150,6 +150,7 @@ def confirm(ui):
 def run(ui):
     ui.s.status.state = "Run"
     ui.s.status.feed = 800
+    ui.s.status.spindle = 12000
     ui.s.status.feed_ov = 110
     ui.s.sent = 1024
     ui.s.progress = 0.45
