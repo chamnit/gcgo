@@ -23,7 +23,15 @@ class PySerialTransport:
         self._s.write(data)
 
     def read(self, n: int = 64) -> bytes:
-        return self._s.read(n)
+        # pyserial's read(n) blocks trying to fill all n bytes, holding the
+        # read open for the full timeout even once a short reply (e.g.
+        # "ok\n") has already arrived. Wait out the timeout for the first
+        # byte only, then drain whatever's already buffered without
+        # blocking further, to match this method's documented contract.
+        data = self._s.read(1)
+        if data and n > 1 and self._s.in_waiting:
+            data += self._s.read(min(n - 1, self._s.in_waiting))
+        return data
 
     def readinto(self, buf) -> int:
         return self._s.readinto(buf) or 0
