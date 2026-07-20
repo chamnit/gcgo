@@ -298,8 +298,11 @@ class Streamer:
             if nl < 0:
                 if self._eof:
                     if self._src_end > self._src_pos:        # last line, no newline
-                        if has_code(self._src, self._src_pos, self._src_end):
-                            self._send_line(self._src_pos, self._src_end, False)
+                        end = self._src_end
+                        if end > self._src_pos and self._src[end - 1] == 0x0D:
+                            end -= 1                          # strip stray trailing CR
+                        if has_code(self._src, self._src_pos, end):
+                            self._send_line(self._src_pos, end, self._src_end, False)
                         else:
                             self._consumed += self._src_end - self._src_pos
                             self._src_pos = self._src_end
@@ -311,29 +314,34 @@ class Streamer:
                 if self._state == ERROR:
                     return
                 continue
-            # whole line [start, nl) plus its newline
+            # whole line [start, nl) plus its newline; strip a CRLF's '\r' so
+            # GRBL (which treats '\r' as its own line terminator) doesn't see
+            # it as a second, empty line and throw off our ack accounting.
             start = self._src_pos
-            nbytes = (nl + 1) - start
-            if not has_code(self._src, start, nl):            # blank/comment-only — skip
-                self._consumed += nbytes
+            content_end = nl
+            if content_end > start and self._src[content_end - 1] == 0x0D:
+                content_end -= 1
+            if not has_code(self._src, start, content_end):   # blank/comment-only — skip
+                self._consumed += (nl + 1) - start
                 self._src_pos = nl + 1
                 continue
+            nbytes = (content_end - start) + 1                # content + the '\n' we send
             if nbytes > RX_BUFFER_SIZE:                        # can never fit — bad file
                 self._state = ERROR
                 return
             if self._buf_used + nbytes > RX_BUFFER_SIZE:
                 return                                        # full; resume next pump
-            if not self._send_line(start, nl, True):
+            if not self._send_line(start, content_end, nl + 1, content_end == nl):
                 return
 
-    def _send_line(self, start: int, content_end: int, has_nl: bool) -> bool:
+    def _send_line(self, start: int, content_end: int, next_pos: int, has_nl: bool) -> bool:
         """Write one line (raw bytes) to GRBL and record it in the in-flight ring.
-        content_end is the index of '\\n' (has_nl) or end-of-data. Returns False
-        if it didn't fit (no newline case re-checked here)."""
-        if has_nl:
-            nbytes = (content_end + 1) - start
-        else:
-            nbytes = (content_end - start) + 1  # we append the missing newline
+        [start, content_end) is the line's content with any CR/LF already
+        stripped; next_pos is where _src_pos resumes. has_nl selects the fast
+        single-write path (only valid when content_end..next_pos is exactly
+        the source '\\n', i.e. no CR was stripped). Returns False if it didn't
+        fit (no newline case re-checked here)."""
+        nbytes = (content_end - start) + 1  # content + the '\n' we send
         if self._buf_used + nbytes > RX_BUFFER_SIZE:
             return False
         if has_nl:
@@ -345,16 +353,13 @@ class Streamer:
         self._if_tail = (self._if_tail + 1) % RING_CAP
         self._if_count += 1
         self._buf_used += nbytes
-        self._consumed += nbytes
+        self._consumed += next_pos - start
         self._sent += 1
         self._sent_any = True
         if self.on_sent:
             text = self._src[start:content_end].decode("utf-8", "replace").strip()
             self.on_sent(self._sent, text)
-        if has_nl:
-            self._src_pos = content_end + 1
-        else:
-            self._src_pos = content_end
+        self._src_pos = next_pos
         return True
 
     def _ack(self) -> None:
