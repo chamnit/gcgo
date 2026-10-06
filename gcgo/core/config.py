@@ -9,6 +9,13 @@ import json
 from gcgo.core.tables import STREAM_ACTIONS
 
 
+# Sent on connect so status reports are in mm, which gcgo then converts for
+# display. Converting here rather than switching the controller to inches keeps
+# units working on firmware with no $13 (caPy reports mm only and answers this
+# with error:3, which is harmless).
+REPORT_MM = "$13=0"
+
+
 class StatusConfig:
     """gcgo display/interaction config: status fields, poll rate, units,
     and streaming real-time key bindings.
@@ -17,7 +24,7 @@ class StatusConfig:
     """
 
     DEFAULT_RATE = 1.0       # seconds between '?' status polls; 0 disables
-    DEFAULT_UNITS = "mm"     # "mm" or "inch"; gcgo owns GRBL's $13 to match
+    DEFAULT_UNITS = "mm"     # "mm" or "inch" display units (converted by gcgo)
     DEFAULT_AFTER = "clear"  # after a completed run: "keep" or "clear" the file
 
     # which override groups a front-end should offer (not every machine has a
@@ -58,9 +65,11 @@ class StatusConfig:
         return "in/min" if self.units == "inch" else "mm/min"
 
     @property
-    def grbl_inch(self) -> str:
-        """The $13 value matching this units setting."""
-        return "1" if self.units == "inch" else "0"
+    def scale(self) -> float:
+        """Display units per reported mm. The controller always reports in mm
+        (see REPORT_MM), so every front-end multiplies positions and feed by
+        this before showing them."""
+        return (1.0 / 25.4) if self.units == "inch" else 1.0
 
     def load(self, path) -> None:
         try:

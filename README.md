@@ -88,14 +88,15 @@ running its already-buffered moves.
 config                      Show all settings
 config fields <name> on|off Toggle a status-line field
 config rate <seconds>       Status query interval (0 disables)
-config units <mm|inch>      Display units; gcgo sets GRBL's $13 to match
+config units <mm|inch>      Display units for positions and feed
 config after <keep|clear>   Keep or unload the file after a completed run
 config keys <action> <char> Bind a streaming real-time key (or 'off' to disable)
 ```
 
-Units note: gcgo owns GRBL's `$13` (report units) so displayed values always
-match their labels — it sets `$13` on connect to match `config units` and
-re-asserts it if you change `$13` in MDI.
+Units note: gcgo keeps the controller reporting in mm (it sends `$13=0` on
+connect and re-asserts it if you change `$13` in MDI) and converts to the
+configured display units itself, so displayed values always match their labels.
+This also works on firmware with no `$13`, such as caPy, which reports mm only.
 
 ## Architecture
 
@@ -112,6 +113,19 @@ gcgo is split so the GRBL "brain" is shared across platforms:
 
 Streaming is a single-threaded non-blocking `pump()`, so the same core drops
 into a desktop loop or an MCU loop unchanged.
+
+### Keeping in step with caPy
+
+caPy publishes its wire definitions as CSV (`doc/csv` in the caPy repo). After
+pulling caPy, run
+
+```
+python3 tools/sync_capy.py            # reads ../caPy/doc/csv
+```
+
+It regenerates the error/alarm text gcgo shows (`gcgo/core/codes.py` for the
+terminal, `static/codes.json` for the web console) and fails, naming them, if
+caPy now sends a machine state or status-report field gcgo doesn't handle.
 
 ## MicroPython (experimental)
 
@@ -169,7 +183,7 @@ doesn't apply to this wiring. Any MicroPython board with WiFi, a UART, and
 
 - Python 3.11+ and `pyserial` (desktop), or MicroPython 1.2x (board)
 - For the web pendant: a WiFi MicroPython board (Pico W or Pico 2 W; ESP32 also works)
-- A GRBL 1.1 controller (e.g. an Arduino running GRBL)
+- A GRBL 1.1 controller (e.g. an Arduino running GRBL) or a GRBL-compatible one such as caPy
 
 ## License
 

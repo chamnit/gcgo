@@ -25,8 +25,9 @@ Input events: "cw" "ccw" "click" "x" "y" "z" "x_hold" "y_hold" "z_hold" "menu".
 import os
 
 from gcgo.core.clock import now_ms, diff_ms
+from gcgo.core.config import REPORT_MM
 from gcgo.core.gcode import validate_gcode
-from gcgo.core.protocol import RUNNING
+from gcgo.core.protocol import FINISHING
 
 # 1-bit OLED palette: off (background) and on (lit pixel). Highlight = an
 # inverse bar (fill FG, draw text in BG) since there's no color to work with.
@@ -89,7 +90,6 @@ class LocalUI:
         self.top = 0
         self.menu_sel = 0
         self.confirm = None   # rel path awaiting run confirmation
-        self.held = False
         self.loaded = None
         self.total = 0        # lines in the running job
 
@@ -101,15 +101,18 @@ class LocalUI:
     # ---- lifecycle ----
     def begin(self):
         self.s.connect()
-        self.s.write_line("$13=" + self.cfg.grbl_inch)
+        self.s.write_line(REPORT_MM)
         self._refresh_files()
         self._dirty = True
 
     def tick(self):
         """Call repeatedly from the main loop. Non-blocking."""
-        if self.s.state == RUNNING:
-            if self.s.pump() != RUNNING:
-                self._end_run()
+        if self.s.active:
+            self.s.pump()
+        elif self.mode == "run":
+            # done (motion drained), errored, or stopped — the stop button lands
+            # between pumps, so the end is handled here rather than after pump()
+            self._end_run()
         else:
             self.s.service()
             if diff_ms(now_ms(), self._poll_at) >= 0:
@@ -193,12 +196,16 @@ class LocalUI:
         elif ev == "click":
             self.s.feed_override_reset()
         elif ev == "x":
-            (self.s.cycle_start if self.held else self.s.feed_hold)()
-            self.held = not self.held
+            (self.s.cycle_start if self._held() else self.s.feed_hold)()
         elif ev == "z":
             self.s.request_stop()
 
     # ---- helpers ----
+    def _held(self):
+        """The machine is in (or entering) a feed hold or door stop, read from
+        its reported state so the X button always matches what it will do."""
+        return self.s.status.state[:4] in ("Hold", "Door")
+
     def _menu_act(self, key):
         if key == "files":
             self._refresh_files()
@@ -211,7 +218,6 @@ class LocalUI:
             self.mode = "jog"
         elif key == "units":
             self.cfg.units = "inch" if self.cfg.units == "mm" else "mm"
-            self.s.write_line("$13=" + self.cfg.grbl_inch)
             if self.config_file:
                 try:
                     self.cfg.save(self.config_file)
@@ -235,7 +241,6 @@ class LocalUI:
             self.mode = "files"
             return
         self.loaded = rel
-        self.held = False
         self.s.begin(path, status_interval=self.cfg.rate)
         self.mode = "run"
 
@@ -249,9 +254,9 @@ class LocalUI:
         wp = st.wpos
         return (self.mode, self.s.state, self.axis_i, self.step_i, self.sel,
                 len(self.entries), self.cwd, self.menu_sel, self.confirm,
-                self.loaded, self.held, round(wp[0], 3), round(wp[1], 3),
-                round(wp[2], 3), int(st.feed), st.feed_ov,
-                self.s.sent, round(self.s.progress, 2))
+                self.loaded, round(wp[0], 3), round(wp[1], 3),
+                round(wp[2], 3), int(st.feed), int(st.spindle), st.feed_ov,
+                st.state, self.s.sent, round(self.s.progress, 2))
 
     # ---- rendering (128x64 mono OLED; 16 cols x 8 rows of 8px text) ----
     def _render(self):
@@ -271,11 +276,12 @@ class LocalUI:
             d.text(d.width - len(right) * cw, y, right, fg, scale)
 
     def _screen_jog(self):
+        k = self.cfg.scale   # reports are mm; convert to the display units
         self._line(0, (self.s.status.state or "-")[:8],
-                   "F%d" % int(self.s.status.feed))
+                   "F%d" % int(self.s.status.feed * k))
         wp = self.s.status.wpos
         for i, ax in enumerate(AXES):
-            self._line(8 + i * 16, "%s%7.3f" % (ax, wp[i]), scale=2,
+            self._line(8 + i * 16, "%s%7.3f" % (ax, wp[i] * k), scale=2,
                        inv=(i == self.axis_i))
         self._line(56, "STEP %gmm" % STEPS[self.step_i], "MENU")
 
@@ -323,13 +329,16 @@ class LocalUI:
 
     def _screen_run(self):
         st = self.s.status
-        # header (not inverted): state + feed-override % (encoder feedback)
-        self._line(0, (st.state or "Run")[:8], "%d%%" % st.feed_ov)
+        # header (not inverted): state + feed-override % (encoder feedback).
+        # Past end of file, flag it — the machine is draining buffered motion.
+        head = ("EOF " + (st.state or "")) if self.s.state == FINISHING \
+            else (st.state or "Run")
+        self._line(0, head[:8], "%d%%" % st.feed_ov)
         self._line(10, (self.loaded or "")[:16])
         # progress bar with the % embedded
         self._barpct(2, 22, 124, 12, self.s.progress,
                      "%d%%" % int(self.s.progress * 100))
         # live feed & spindle rates
-        self._line(40, "F%d" % int(st.feed), "S%d" % int(st.spindle))
+        self._line(40, "F%d" % int(st.feed * self.cfg.scale), "S%d" % int(st.spindle))
         # bottom bar: button hints
-        self._line(56, "X:resume Z:stop" if self.held else "X:hold  Z:stop", inv=True)
+        self._line(56, "X:resume Z:stop" if self._held() else "X:hold  Z:stop", inv=True)

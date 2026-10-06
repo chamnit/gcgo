@@ -13,12 +13,14 @@ except ImportError:                      # MicroPython <1.20
     import uasyncio as asyncio
 
 from gcgo.core.clock import diff_ms, now_ms
+from gcgo.core.config import REPORT_MM
 from gcgo.core.gcode import validate_gcode
-from gcgo.core.protocol import RUNNING
+from gcgo.core.protocol import FINISHING, RUNNING
 from gcgo.core.tables import ACTION_METHOD
 from gcgo.frontends.web import ws as wsproto
 
-_CT = {"html": "text/html", "js": "application/javascript", "css": "text/css"}
+_CT = {"html": "text/html", "js": "application/javascript", "css": "text/css",
+       "json": "application/json"}
 _GCODE_EXT = (".gcode", ".nc", ".g", ".gc", ".ngc")
 
 
@@ -101,15 +103,16 @@ class WebServer:
         self.clients = []      # connected WS writers
         self.pending = []      # JSON objects queued for broadcast
         self.loaded = None
+        self._job = False      # a run was started and its end hasn't been handled
         self.s.on_response = self._on_response
         self.s.on_message = self._on_message
         self.s.gc_collect = True
-        self._apply_units()
+        self.s.write_line(REPORT_MM)
 
     def _on_response(self, i, r):
-        # while streaming, only surface errors (avoid one msg per 'ok'); idle,
-        # surface every response so MDI replies show in the log.
-        if self.s.state != RUNNING or r.startswith("error"):
+        # while the job owns the machine, only surface errors (avoid one msg per
+        # 'ok'); idle, surface every response so MDI replies show in the log.
+        if not self.s.active or r.startswith("error"):
             self.broadcast({"type": "msg", "line": r})
 
     def _on_message(self, m):
@@ -118,18 +121,16 @@ class WebServer:
 
     # --- helpers ---
 
-    def _apply_units(self):
-        self.s.write_line("$13=" + self.cfg.grbl_inch)
-
     def broadcast(self, obj):
         self.pending.append(obj)
 
     def status_obj(self):
         st = self.s.status
+        k = self.cfg.scale   # reports are mm; convert to the display units
         return {
             "type": "status", "state": st.state,
-            "wpos": list(st.wpos), "mpos": list(st.mpos),
-            "feed": st.feed, "spindle": st.spindle,
+            "wpos": [v * k for v in st.wpos], "mpos": [v * k for v in st.mpos],
+            "feed": st.feed * k, "spindle": st.spindle,
             "ov": [st.feed_ov, st.rapid_ov, st.spindle_ov],
             "pins": st.pins, "units": self.cfg.pos_unit,
             "stream": {"state": self.s.state, "sent": self.s.sent,
@@ -177,8 +178,12 @@ class WebServer:
         elif c == "reset":
             self.s.request_reset()
         elif c == "mdi":
-            if self.s.state != RUNNING:
-                self.s.write_line(cmd.get("line", ""))
+            if not self.s.active:   # no MDI while a job is running or draining
+                line = cmd.get("line", "")
+                self.s.write_line(line)
+                # gcgo converts units itself, so reports must stay in mm
+                if line.replace(" ", "").startswith("$13="):
+                    self.s.write_line(REPORT_MM)
         elif c == "load":
             self.loaded = _safe_rel(cmd.get("file", "")) or None
             self.broadcast({"type": "msg", "line": "loaded " + str(self.loaded)})
@@ -195,7 +200,6 @@ class WebServer:
             if v in ("mm", "inch"):
                 self.cfg.units = v
                 self._save_cfg()
-                self._apply_units()
                 self.broadcast(self.settings_obj())
         elif c == "rate":
             try:
@@ -222,7 +226,7 @@ class WebServer:
             self.broadcast(self.list_dir(cmd.get("dir", "")))
 
     def _start_run(self, f):
-        if self.s.state == RUNNING:
+        if self.s.active:   # a job is still running or draining buffered motion
             return
         rel = _safe_rel(f or "")
         if not rel:
@@ -237,6 +241,7 @@ class WebServer:
         self.loaded = rel
         self.s.begin(path, on_response=self._on_response, on_message=self._on_message,
                      status_interval=self.cfg.rate)
+        self._job = True
         self.broadcast({"type": "msg", "line": "streaming %s (%d lines)" % (rel, n)})
 
     def _delete(self, f):
@@ -274,15 +279,27 @@ class WebServer:
         poll_at = 0
         bcast_at = 0
         while True:
-            if self.s.state == RUNNING:
-                if self.s.pump() != RUNNING:
-                    st = self.s.state
-                    if st != "done" and self.s.sent_any:
-                        self.s.request_cancel()
-                    elif st == "done" and self.cfg.after == "clear":
-                        self.loaded = None
+            if self.s.active:
+                was = self.s.state
+                self.s.pump()
+                # end of file: sending finished, but the machine keeps executing
+                # buffered motion. Announce it and let the loop keep polling.
+                if was == RUNNING and self.s.state == FINISHING:
                     self.broadcast({"type": "msg",
-                                    "line": "stream %s (%d lines)" % (st, self.s.sent)})
+                                    "line": "end of file (%d lines) — finishing motion"
+                                            % self.s.sent})
+            elif self._job:
+                # The job ended — in pump() (done/error) or from a client's stop,
+                # which lands between passes. Anything but a clean finish leaves
+                # buffered motion running, so halt the machine and flush it.
+                self._job = False
+                st = self.s.state
+                if st != "done" and self.s.sent_any:
+                    self.s.request_cancel()
+                elif st == "done" and self.cfg.after == "clear":
+                    self.loaded = None
+                self.broadcast({"type": "msg",
+                                "line": "stream %s (%d lines)" % (st, self.s.sent)})
             else:
                 self.s.service()
                 # poll interval tracks cfg.rate so a settings change takes effect live
@@ -421,7 +438,7 @@ class WebServer:
         name = _basename(q.get("name", ""))
         subdir = _safe_rel(q.get("dir", ""))
         length = int(hdrs.get("content-length", "0") or 0)
-        if not name or subdir is None or self.s.state == RUNNING:
+        if not name or subdir is None or self.s.active:
             await self._drain(reader, length)
             await self._http_text(writer, 400, "rejected")
             return

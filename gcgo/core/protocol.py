@@ -23,10 +23,16 @@ RING_CAP = 96       # max gcode lines in flight (127B RX / shortest line)
 
 # stream states
 IDLE = "idle"
-RUNNING = "running"
+RUNNING = "running"      # sending lines and polling status
+FINISHING = "finishing"  # file fully sent; polling while buffered motion drains
 DONE = "done"
 ERROR = "error"
 STOPPED = "stopped"
+
+# GRBL run-states in which the machine is still moving (or paused mid-motion),
+# so buffered motion from a finished stream hasn't fully drained yet. Anything
+# else (Idle, Alarm, Check, Sleep) is settled — nothing left to execute.
+_MOVING_STATES = ("Run", "Jog", "Home", "Hold", "Door")
 
 
 class Streamer:
@@ -68,6 +74,8 @@ class Streamer:
         self._state = IDLE
         self._poll_ms = 0
         self._poll_at = 0
+        self._status_seq = 0        # count of status reports parsed this stream
+        self._finish_seq = 0        # _status_seq at the moment we entered FINISHING
         self.on_sent = None
         self.on_response = None
         self.on_message = None
@@ -129,7 +137,11 @@ class Streamer:
             line = self._next_line()
             if line is not None:
                 return line
-            chunk = self._io.read(64)
+            # Read only what has arrived (or wait for one byte): asking for a
+            # fixed count blocks until that many bytes or the full timeout, so a
+            # short reply like "ok" would stall every command for the timeout.
+            n = self._io.any()
+            chunk = self._io.read(min(n, 64) if n > 0 else 1)
             if not chunk:
                 return ""
             self._rx.extend(chunk)
@@ -220,6 +232,13 @@ class Streamer:
         return self._state
 
     @property
+    def active(self) -> bool:
+        """True while the stream still owns the machine: sending lines (RUNNING)
+        or waiting for buffered motion to drain (FINISHING). Drivers should keep
+        pumping and polling status while this is True."""
+        return self._state == RUNNING or self._state == FINISHING
+
+    @property
     def sent(self) -> int:
         return self._sent
 
@@ -260,7 +279,9 @@ class Streamer:
             self._poll_at = now_ms() + self._poll_ms
 
     def request_stop(self) -> None:
-        if self._state == RUNNING:
+        # Abortable both while sending (RUNNING) and while draining (FINISHING) —
+        # in FINISHING the machine is still executing buffered motion.
+        if self._state == RUNNING or self._state == FINISHING:
             self._state = STOPPED
             self._close_file()
 
@@ -298,11 +319,11 @@ class Streamer:
             if nl < 0:
                 if self._eof:
                     if self._src_end > self._src_pos:        # last line, no newline
-                        end = self._src_end
-                        if end > self._src_pos and self._src[end - 1] == 0x0D:
-                            end -= 1                          # strip stray trailing CR
-                        if has_code(self._src, self._src_pos, end):
-                            self._send_line(self._src_pos, end, self._src_end, False)
+                        if has_code(self._src, self._src_pos, self._src_end):
+                            end = self._src_end
+                            if self._src[end - 1] == 0x0d:   # stray '\r' (see below)
+                                end -= 1
+                            self._send_line(self._src_pos, end, self._src_end)
                         else:
                             self._consumed += self._src_end - self._src_pos
                             self._src_pos = self._src_end
@@ -314,40 +335,36 @@ class Streamer:
                 if self._state == ERROR:
                     return
                 continue
-            # whole line [start, nl) plus its newline; strip a CRLF's '\r' so
-            # GRBL (which treats '\r' as its own line terminator) doesn't see
-            # it as a second, empty line and throw off our ack accounting.
+            # whole line [start, nl) plus its newline
             start = self._src_pos
-            content_end = nl
-            if content_end > start and self._src[content_end - 1] == 0x0D:
-                content_end -= 1
-            if not has_code(self._src, start, content_end):   # blank/comment-only — skip
+            if not has_code(self._src, start, nl):            # blank/comment-only — skip
                 self._consumed += (nl + 1) - start
                 self._src_pos = nl + 1
                 continue
-            nbytes = (content_end - start) + 1                # content + the '\n' we send
+            # A CRLF file's '\r' is not sent: GRBL ends a line on '\r' AND on
+            # '\n', answering the empty second one with its own 'ok', which
+            # would double-acknowledge every line and corrupt the byte count.
+            end = nl - 1 if self._src[nl - 1] == 0x0d else nl
+            nbytes = (end - start) + 1                         # content + '\n'
             if nbytes > RX_BUFFER_SIZE:                        # can never fit — bad file
                 self._state = ERROR
                 return
             if self._buf_used + nbytes > RX_BUFFER_SIZE:
                 return                                        # full; resume next pump
-            if not self._send_line(start, content_end, nl + 1, content_end == nl):
+            if not self._send_line(start, end, nl + 1):
                 return
 
-    def _send_line(self, start: int, content_end: int, next_pos: int, has_nl: bool) -> bool:
-        """Write one line (raw bytes) to GRBL and record it in the in-flight ring.
-        [start, content_end) is the line's content with any CR/LF already
-        stripped; next_pos is where _src_pos resumes. has_nl selects the fast
-        single-write path (only valid when content_end..next_pos is exactly
-        the source '\\n', i.e. no CR was stripped). Returns False if it didn't
-        fit (no newline case re-checked here)."""
-        nbytes = (content_end - start) + 1  # content + the '\n' we send
+    def _send_line(self, start: int, end: int, next_pos: int) -> bool:
+        """Write one line, src[start:end] plus a newline, to GRBL and record it
+        in the in-flight ring. next_pos is where the following line starts in
+        _src (past any line ending). Returns False if it doesn't fit yet."""
+        nbytes = (end - start) + 1
         if self._buf_used + nbytes > RX_BUFFER_SIZE:
             return False
-        if has_nl:
-            self._io.write(self._srcmv[start:content_end + 1])
+        if end < next_pos and self._src[end] == 0x0a:        # '\n' follows: one write
+            self._io.write(self._srcmv[start:end + 1])
         else:
-            self._io.write(self._srcmv[start:content_end])
+            self._io.write(self._srcmv[start:end])
             self._io.write(b"\n")
         self._ring[self._if_tail] = nbytes
         self._if_tail = (self._if_tail + 1) % RING_CAP
@@ -357,7 +374,7 @@ class Streamer:
         self._sent += 1
         self._sent_any = True
         if self.on_sent:
-            text = self._src[start:content_end].decode("utf-8", "replace").strip()
+            text = self._src[start:end].decode("utf-8", "replace").strip()
             self.on_sent(self._sent, text)
         self._src_pos = next_pos
         return True
@@ -370,38 +387,63 @@ class Streamer:
         self._acked += 1
 
     def pump(self) -> str:
-        """Advance the stream by a bounded, non-blocking step. Returns state."""
-        if self._state != RUNNING:
+        """Advance the stream by a bounded, non-blocking step. Returns state.
+
+        RUNNING sends lines and polls status. When the file is fully sent and
+        acknowledged the stream enters FINISHING: nothing more is sent, but
+        status polling continues while GRBL drains its planner — motion can
+        outlast the last 'ok' by minutes. DONE is reached only once GRBL reports
+        a settled (non-moving) state, so completion means the job truly finished.
+        """
+        if self._state != RUNNING and self._state != FINISHING:
             return self._state
 
-        # 1) fill GRBL's RX buffer from the file
-        self._fill_grbl()
-        if self._state == ERROR:
-            self._close_file()
-            return self._state
+        if self._state == RUNNING:
+            # 1) fill GRBL's RX buffer from the file
+            self._fill_grbl()
+            if self._state == ERROR:
+                self._close_file()
+                return self._state
 
-        # 1b) collect garbage now if asked and GRBL's buffer is full — the
-        #     planner has buffered motion to cover the pause. Throttled.
-        if self.gc_collect and self._buf_used >= RX_BUFFER_SIZE - 40:
-            now = now_ms()
-            if diff_ms(now, self._gc_at) >= 0:
-                gc.collect()
-                self._gc_at = now + GC_SLACK_MS
+            # 1b) collect garbage now if asked and GRBL's buffer is full — the
+            #     planner has buffered motion to cover the pause. Throttled.
+            if self.gc_collect and self._buf_used >= RX_BUFFER_SIZE - 40:
+                now = now_ms()
+                if diff_ms(now, self._gc_at) >= 0:
+                    gc.collect()
+                    self._gc_at = now + GC_SLACK_MS
 
-        # 2) timed status poll
+        # 2) timed status poll (continues through FINISHING so the machine stays
+        #    observable while it drains buffered motion)
         if self._poll_ms and diff_ms(now_ms(), self._poll_at) >= 0:
             self._io.write(b"?")
             self._poll_at = now_ms() + self._poll_ms
 
-        # 3) consume responses, accounting acks against the in-flight buffer
-        self._read_and_route(True)
+        # 3) consume responses; acks only matter while still sending lines
+        self._read_and_route(self._state == RUNNING)
         if self._state == ERROR:
             return self._state
 
-        # 4) completion: file exhausted and every sent line acknowledged
-        if self._eof and self._src_end == self._src_pos and self._acked >= self._sent:
-            self._state = DONE
+        # 4) end of file: everything sent and acknowledged. With status polling
+        #    on, hand off to FINISHING and keep polling so reports continue until
+        #    the machine actually drains its buffered motion. With polling off we
+        #    have no way to observe that, so complete right away (old behaviour).
+        if (self._state == RUNNING and self._eof
+                and self._src_end == self._src_pos and self._acked >= self._sent):
             self._close_file()
+            if self._poll_ms:
+                self._state = FINISHING
+                self._finish_seq = self._status_seq
+                self._io.write(b"?")   # fresh status now, don't wait a full tick
+                self._poll_at = now_ms() + self._poll_ms
+            else:
+                self._state = DONE
+
+        # 5) FINISHING -> DONE once a status report taken *after* end of file
+        #    shows the machine no longer moving (planner and steppers drained).
+        if (self._state == FINISHING and self._status_seq > self._finish_seq
+                and not _motion_pending(self.status.state)):
+            self._state = DONE
         return self._state
 
     def _read_and_route(self, streaming: bool) -> None:
@@ -439,6 +481,7 @@ class Streamer:
             elif c0 == 0x3c:                           # '<' status report
                 msg = self._rx[start:end].decode("utf-8", "replace")
                 self.status.update(msg)
+                self._status_seq += 1                  # gate FINISHING completion
                 if self.on_message:
                     self.on_message(msg)
             else:                                      # [MSG:...], ALARM:, etc.
@@ -479,6 +522,14 @@ class Streamer:
         if self._rx_pos > 64:  # compact infrequently, not every pump
             self._rx = self._rx[self._rx_pos:]
             self._rx_pos = 0
+
+
+def _motion_pending(state: str) -> bool:
+    """True while GRBL's state means motion is still in flight, so a finished
+    stream's buffered moves haven't fully drained. Strips any substate suffix
+    (e.g. 'Hold:0', 'Door:1') before matching."""
+    base = state.split(":", 1)[0] if state else ""
+    return base in _MOVING_STATES
 
 
 def _file_size(path) -> int:

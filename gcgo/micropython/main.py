@@ -10,24 +10,22 @@ Usage on the board:
 
 import time
 
-from gcgo.core.config import StatusConfig
+from gcgo.core.config import REPORT_MM, StatusConfig
 from gcgo.core.gcode import validate_gcode
-from gcgo.core.protocol import RUNNING, Streamer
+from gcgo.core.protocol import FINISHING, RUNNING, Streamer
 from gcgo.micropython.transport import UARTTransport
 
 CONFIG_FILE = "gcgo_config.json"
 
 
-def _apply_units(streamer, cfg):
-    streamer.send_command("$13=" + cfg.grbl_inch)
-
-
 def _status_line(st, cfg):
     if not st.state:
         return ""
+    k = cfg.scale   # reports are mm; convert to the display units
     wx, wy, wz = st.wpos
     u = cfg.pos_unit
-    return "[%s] W:%.3f %.3f %.3f %s F:%.0f" % (st.state, wx, wy, wz, u, st.feed)
+    return "[%s] W:%.3f %.3f %.3f %s F:%.0f" % (st.state, wx * k, wy * k, wz * k,
+                                                u, st.feed * k)
 
 
 def _stream(streamer, cfg, path):
@@ -43,8 +41,17 @@ def _stream(streamer, cfg, path):
     print("Streaming %s (%d lines) — Ctrl-C to stop" % (path, total))
 
     next_print = time.ticks_ms()
+    eof_noted = False
     try:
-        while streamer.pump() == RUNNING:
+        while True:
+            st = streamer.pump()
+            if st == FINISHING and not eof_noted:
+                # File fully sent; keep polling while GRBL drains buffered motion.
+                eof_noted = True
+                print("  end of file (%d lines) — finishing motion, Ctrl-C to stop"
+                      % streamer.sent)
+            if st != RUNNING and st != FINISHING:
+                break
             now = time.ticks_ms()
             if time.ticks_diff(now, next_print) >= 0:
                 print("  %d/%d  %.0f%%  %s" % (streamer.sent, total,
@@ -69,7 +76,7 @@ def run(streamer, cfg):
     greeting = streamer.connect() or streamer.query_status()
     if greeting:
         print('GRBL: "%s"' % greeting)
-    _apply_units(streamer, cfg)
+    streamer.send_command(REPORT_MM)   # reports in mm; gcgo converts for display
     print("gcgo (MicroPython) — commands: ls, cd, load <f>, run, status, reset, units mm|inch, quit")
     print("Any other input is sent to GRBL as a command.")
 
@@ -125,8 +132,7 @@ def run(streamer, cfg):
                 if arg in ("mm", "inch"):
                     cfg.units = arg
                     cfg.save(CONFIG_FILE)
-                    _apply_units(streamer, cfg)
-                print("  units = %s ($13=%s)" % (cfg.units, cfg.grbl_inch))
+                print("  units = %s" % cfg.units)
             else:
                 streamer.send_command_verbose(raw, on_line=lambda l: print('  "%s"' % l))
         except KeyboardInterrupt:

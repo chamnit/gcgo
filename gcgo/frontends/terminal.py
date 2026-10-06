@@ -7,14 +7,14 @@ import os
 import sys
 import time
 
-from gcgo.core.config import StatusConfig
+from gcgo.core.codes import ALARMS as _ALARMS, ERRORS as _ERRORS
+from gcgo.core.config import REPORT_MM, StatusConfig
 from gcgo.core.gcode import validate_gcode
-from gcgo.core.protocol import RUNNING, Streamer
+from gcgo.core.protocol import FINISHING, RUNNING, Streamer
 from gcgo.core.status import GRBLStatus
 from gcgo.core.tables import (
     ACTION_DESC as _ACTION_DESC,
     ACTION_METHOD as _ACTION_METHOD,
-    GRBL_ERRORS as _GRBL_ERRORS,
     GRBL_SETTINGS as _GRBL_SETTINGS,
     PARAM_NAMES as _PARAM_NAMES,
     STREAM_ACTIONS,
@@ -25,11 +25,31 @@ from gcgo.desktop.paths import CONFIG_FILE
 from gcgo.desktop.transport import list_ports
 
 
+def _explain(line: str) -> str:
+    """The meaning of an error or alarm line, or "" if it isn't one or the code
+    is unknown. Handles GRBL's "error:N" / "ALARM:N" and caPy's worded
+    "error: text [N]"."""
+    if line.startswith("error"):
+        table = _ERRORS
+    elif line.startswith("ALARM:"):
+        table = _ALARMS
+    else:
+        return ""
+    tail = line.split(":", 1)[1].strip() if ":" in line else ""
+    if tail.endswith("]") and "[" in tail:
+        tail = tail[tail.rindex("[") + 1:-1]
+    try:
+        return table.get(int(tail), "")
+    except ValueError:
+        return ""
+
+
 def _grbl(line: str) -> str:
     """Format a raw GRBL message for display: indented and quoted, so GRBL's
     own words (ok, error:N, [MSG:...], the welcome string) are visually
-    distinct from gcgo's output."""
-    return f'  "{line}"'
+    distinct from gcgo's output. Errors and alarms get their meaning appended."""
+    why = _explain(line)
+    return f'  "{line}"  — {why}' if why else f'  "{line}"'
 
 
 def _format_status_line(st: GRBLStatus, progress: str, cfg: StatusConfig) -> str:
@@ -42,9 +62,10 @@ def _format_status_line(st: GRBLStatus, progress: str, cfg: StatusConfig) -> str
         return progress
     show = cfg.show
     u = cfg.pos_unit
-    wx, wy, wz = st.wpos
-    mx, my, mz = st.mpos
-    ox, oy, oz = st.wco
+    k = cfg.scale   # reports are mm; convert to the display units
+    wx, wy, wz = (v * k for v in st.wpos)
+    mx, my, mz = (v * k for v in st.mpos)
+    ox, oy, oz = (v * k for v in st.wco)
     pins = st.pins if st.pins else "-"
 
     parts = []
@@ -57,7 +78,7 @@ def _format_status_line(st: GRBLStatus, progress: str, cfg: StatusConfig) -> str
     if show["wco"]:
         parts.append(f"O:{ox:9.3f} {oy:9.3f} {oz:9.3f} {u}")
     if show["feed"]:
-        parts.append(f"F:{st.feed:6.0f} {cfg.feed_unit}")
+        parts.append(f"F:{st.feed * k:6.0f} {cfg.feed_unit}")
     if show["spindle"]:
         parts.append(f"S:{st.spindle:6.0f} RPM")
 
@@ -81,14 +102,15 @@ def _format_status_line(st: GRBLStatus, progress: str, cfg: StatusConfig) -> str
 def _print_status_detail(st: GRBLStatus, cfg: StatusConfig) -> None:
     """Multi-line formatted status for the status command."""
     u = cfg.pos_unit
-    wx, wy, wz = st.wpos
-    mx, my, mz = st.mpos
+    k = cfg.scale   # reports are mm; convert to the display units
+    wx, wy, wz = (v * k for v in st.wpos)
+    mx, my, mz = (v * k for v in st.mpos)
     pins_str = " ".join(st.pins) if st.pins else "none"
     print(f"""
   State:      {st.state}
   Work pos:   X: {wx:10.3f}  Y: {wy:10.3f}  Z: {wz:10.3f}  {u}
   Mach pos:   X: {mx:10.3f}  Y: {my:10.3f}  Z: {mz:10.3f}  {u}
-  Feed:       {st.feed:.0f} {cfg.feed_unit}
+  Feed:       {st.feed * k:.0f} {cfg.feed_unit}
   Spindle:    {st.spindle:.0f} RPM
   Overrides:  Feed {st.feed_ov}%  Rapid {st.rapid_ov}%  Spindle {st.spindle_ov}%
   Limit pins: {pins_str}
@@ -118,6 +140,27 @@ Tab completes commands and file paths (load/cd/ls).
 """
 
 
+def _tidy_number(val: str) -> str:
+    """A setting value without padding zeros ("10000.000" -> "10000"), so the
+    table reads the same whether the firmware prints "1" (GRBL) or "1.000"
+    (caPy). Non-numeric values pass through unchanged."""
+    val = val.strip()
+    try:
+        float(val)
+    except ValueError:
+        return val
+    if "." in val:
+        val = val.rstrip("0").rstrip(".")
+    return val or "0"
+
+
+def _is_capy(streamer: Streamer) -> bool:
+    """True if the controller's build info ($I) identifies it as caPy."""
+    lines: list[str] = []
+    streamer.send_command_verbose("$I", on_line=lines.append)
+    return any(l.startswith("[VER:") and "capy" in l.lower() for l in lines)
+
+
 def _print_settings(streamer: Streamer) -> None:
     raw_lines: list[str] = []
     streamer.send_command_verbose("$$", on_line=raw_lines.append)
@@ -136,9 +179,10 @@ def _print_settings(streamer: Streamer) -> None:
             print(f"  {line}")
             continue
 
+        val = _tidy_number(val)
         desc, unit = _GRBL_SETTINGS.get(n, ("", ""))
         if unit == "bool":
-            val_str = "enabled" if val.strip() == "1" else "disabled"
+            val_str = "disabled" if val == "0" else "enabled"
         elif unit:
             val_str = f"{val}  ({unit})"
         else:
@@ -147,6 +191,18 @@ def _print_settings(streamer: Streamer) -> None:
         desc_str = f"  {desc}" if desc else ""
         print(f"  {key:<5} = {val_str:<24}{desc_str}")
     print()
+
+    # caPy keeps its full set under named group.name keys; $$ above is only the
+    # GRBL-numbered subset. Its $settings report is already self-describing
+    # ("$key=value ; meaning"), so show it as sent.
+    if _is_capy(streamer):
+        named: list[str] = []
+        streamer.send_command_verbose("$settings", on_line=named.append)
+        print("  caPy settings ($settings) — change one in mdi with $key=value:")
+        for line in named:
+            if line != "ok":
+                print(f"  {line}")
+        print()
 
 
 def _print_params(streamer: Streamer) -> None:
@@ -165,15 +221,15 @@ def _print_params(streamer: Streamer) -> None:
         name = _PARAM_NAMES.get(key, key)
 
         if key == "TLO":
-            print(f"  {key}  {name:<18}  Z: {rest:>10}")
+            print(f"  {key:<5}  {name:<18}  Z: {rest:>10}")
         elif key == "PRB":
             coords, _, success = rest.rpartition(":")
             x, y, z = coords.split(",")
             result = "success" if success == "1" else "failed"
-            print(f"  {key}  {name:<18}  X: {x:>10}  Y: {y:>10}  Z: {z:>10}  ({result})")
+            print(f"  {key:<5}  {name:<18}  X: {x:>10}  Y: {y:>10}  Z: {z:>10}  ({result})")
         else:
             x, y, z = rest.split(",")
-            print(f"  {key}  {name:<18}  X: {x:>10}  Y: {y:>10}  Z: {z:>10}")
+            print(f"  {key:<5}  {name:<18}  X: {x:>10}  Y: {y:>10}  Z: {z:>10}")
     print()
 
 
@@ -230,10 +286,10 @@ def _mdi_loop(streamer: Streamer, cfg: StatusConfig) -> None:
                 print(_grbl(greeting))
         else:
             streamer.send_command_verbose(line, on_line=lambda l: print(_grbl(l)))
-            # gcgo owns $13 to keep status units in sync with its labels.
-            if line.replace(" ", "").lower().startswith("$13="):
-                _apply_units(streamer, cfg)
-                print(f"  [gcgo] $13 re-asserted to {cfg.grbl_inch} (units={cfg.units})")
+            # gcgo converts units itself, so reports must stay in mm.
+            if line.replace(" ", "").startswith("$13="):
+                _report_mm(streamer)
+                print(f"  [gcgo] {REPORT_MM} re-asserted (gcgo converts to {cfg.units} itself)")
 
 
 def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
@@ -258,14 +314,8 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
 
     def on_response(n, resp):
         if not resp.startswith("ok"):
-            desc = ""
-            if resp.startswith("error:"):
-                try:
-                    code = int(resp.split(":")[1])
-                    desc = f"  — {_GRBL_ERRORS[code]}" if code in _GRBL_ERRORS else ""
-                except (IndexError, ValueError):
-                    pass
-            print_above(f'  [{n}] "{resp}"{desc}', status_line())
+            why = _explain(resp)
+            print_above(f'  [{n}] "{resp}"' + (f"  — {why}" if why else ""), status_line())
 
     def on_message(msg):
         if msg.startswith("<"):
@@ -283,7 +333,18 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
     err = None
     with keyboard.stream_keys() as keys:
         try:
-            while streamer.pump() == RUNNING:
+            prev = RUNNING
+            while True:
+                st = streamer.pump()
+                if st == FINISHING and prev != FINISHING:
+                    # File fully sent; GRBL keeps executing buffered motion.
+                    # Keep polling (loop continues) so status stays live until Idle.
+                    print_above(f"  end of file ({streamer.sent} lines) — "
+                                "finishing motion, keys still active",
+                                status_line())
+                prev = st
+                if st != RUNNING and st != FINISHING:
+                    break
                 key = keys.poll_key()
                 if key is not None:
                     aid = keymap.get(key)
@@ -336,9 +397,9 @@ def _connect_message(greeting: str, streamer: Streamer) -> str:
     return greeting or streamer.query_status()
 
 
-def _apply_units(streamer: Streamer, cfg: StatusConfig) -> None:
-    """Write GRBL's $13 to match the configured display units."""
-    streamer.send_command(f"$13={cfg.grbl_inch}")
+def _report_mm(streamer: Streamer) -> None:
+    """Keep the controller's reports in mm; gcgo converts for display."""
+    streamer.send_command(REPORT_MM)
 
 
 def _key_conflict(cfg: StatusConfig, aid: str, key: str):
@@ -436,7 +497,7 @@ def _config_fields(cfg: StatusConfig, parts: list) -> None:
     print(f"  {key} = {'on' if cfg.show[key] else 'off'}")
 
 
-def _run_config(cfg: StatusConfig, arg: str, streamer: Streamer) -> None:
+def _run_config(cfg: StatusConfig, arg: str) -> None:
     """View or dispatch gcgo config subsections: fields, rate, units, keys."""
     parts = arg.split()
 
@@ -451,7 +512,7 @@ def _run_config(cfg: StatusConfig, arg: str, streamer: Streamer) -> None:
         print("Config:")
         print(f"  fields   {on_fields}/{len(cfg.show)} shown   (config fields)")
         print(f"  rate     {rate}            (config rate <seconds>)")
-        print(f"  units    {cfg.units} ($13={cfg.grbl_inch})       (config units <mm|inch>)")
+        print(f"  units    {cfg.units}             (config units <mm|inch>)")
         print(f"  after    {cfg.after}          (config after <keep|clear>)")
         print(f"  keys     {bound or '(none bound)'}")
         print("           (config keys)")
@@ -490,8 +551,7 @@ def _run_config(cfg: StatusConfig, arg: str, streamer: Streamer) -> None:
                 print(f"Invalid units: {parts[1]!r} (use mm or inch)")
                 return
             cfg.save(CONFIG_FILE)
-            _apply_units(streamer, cfg)
-        print(f"  units = {cfg.units}  ($13={cfg.grbl_inch})")
+        print(f"  units = {cfg.units}")
         return
 
     if section == "after":
@@ -514,9 +574,9 @@ def run(streamer: Streamer, cfg: StatusConfig) -> None:
         greeting = streamer.connect()
         msg = _connect_message(greeting, streamer)
         print(_grbl(msg) if msg else "  (no response from GRBL — check baud/port)")
-        # gcgo owns GRBL's $13 so report units always match its display labels.
-        _apply_units(streamer, cfg)
-        print(f"Report units: {cfg.units} ($13={cfg.grbl_inch})")
+        # Reports stay in mm and gcgo converts, so values always match labels.
+        _report_mm(streamer)
+        print(f"Display units: {cfg.units}")
     except KeyboardInterrupt:
         print("\nConnection aborted.")
         streamer.disconnect()
@@ -625,7 +685,7 @@ def _repl(streamer: Streamer, cfg: StatusConfig) -> None:
                         print("File unloaded.")
 
             elif cmd == "config":
-                _run_config(cfg, arg, streamer)
+                _run_config(cfg, arg)
 
             elif cmd == "reset":
                 greeting = streamer.soft_reset()

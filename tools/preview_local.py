@@ -103,7 +103,7 @@ class FakeStreamer:
 
 
 class Cfg:
-    grbl_inch = "0"
+    scale = 1.0
     pos_unit = "mm"
     units = "mm"
     rate = 0.5

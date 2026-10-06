@@ -19,8 +19,12 @@ def validate_gcode(path) -> int:
             content = line.rstrip(b"\r\n")
             if not has_code(content, 0, len(content)):
                 continue  # blank or comment-only — streamer skips it
-            # bytes the streamer actually sends (raw line + its newline, \r kept)
-            sent = len(line) if line.endswith(b"\n") else len(line) + 1
+            # bytes the streamer actually sends: the line plus one newline (a
+            # CRLF ending goes out as a bare '\n')
+            sent = len(line[:-1] if line.endswith(b"\n") else line)
+            if line.endswith(b"\r\n"):
+                sent -= 1
+            sent += 1
             if sent > RX_BUFFER_SIZE:
                 raise ValueError(
                     "a line is %d bytes, exceeds the %d-byte GRBL buffer"
