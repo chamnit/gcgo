@@ -48,6 +48,7 @@ load <file>   Load a g-code file
 run           Stream the loaded file
 mdi           Enter MDI mode (send g-code/$-commands directly to GRBL)
 settings      Show GRBL $$ settings in readable form
+              (caPy: settings GROUP for one group, settings all for every setting)
 params        Show GRBL $# coordinate parameters
 unlock        Unlock GRBL alarm state ($X)
 home          Run homing cycle ($H)

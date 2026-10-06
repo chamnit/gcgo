@@ -4,6 +4,7 @@ command dispatch, driving the core over the desktop adapters."""
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 
@@ -27,21 +28,37 @@ from gcgo.desktop.transport import list_ports
 
 def _explain(line: str) -> str:
     """The meaning of an error or alarm line, or "" if it isn't one or the code
-    is unknown. Handles GRBL's "error:N" / "ALARM:N" and caPy's worded
-    "error: text [N]"."""
-    if line.startswith("error"):
+    is unknown. Handles GRBL's "error:N" / "ALARM:N" and caPy's
+    "error:N ; Message" (the text after ';' is already the short message)."""
+    if line.startswith("error:"):
         table = _ERRORS
     elif line.startswith("ALARM:"):
         table = _ALARMS
     else:
         return ""
-    tail = line.split(":", 1)[1].strip() if ":" in line else ""
-    if tail.endswith("]") and "[" in tail:
-        tail = tail[tail.rindex("[") + 1:-1]
+    tail = line.split(":", 1)[1].partition(";")[0].strip()
     try:
         return table.get(int(tail), "")
     except ValueError:
         return ""
+
+
+# Lines whose 'ok' waits for motion: a probe (G38.x) answers [PRB:] then ok, a
+# program end (M2/M30) [MSG:Pgm End] then ok, a dwell (G4) and $H once done.
+_HOLDS_OK = re.compile(r"G0*38|G0*4(?![0-9.])|M0*2(?![0-9.])|M30(?![0-9.])|^\$H$")
+
+
+def _holds_ok(line: str) -> bool:
+    """True if the controller holds this MDI line's 'ok' until motion finishes,
+    so the read has to wait longer than the usual timeout."""
+    return bool(_HOLDS_OK.search(line.upper().replace(" ", "")))
+
+
+def _tidy(line: str) -> str:
+    """caPy's "$" reply rows come as "[$:text]"; show just the text."""
+    if line.startswith("[$:") and line.endswith("]"):
+        return line[3:-1]
+    return line
 
 
 def _grbl(line: str) -> str:
@@ -49,6 +66,7 @@ def _grbl(line: str) -> str:
     own words (ok, error:N, [MSG:...], the welcome string) are visually
     distinct from gcgo's output. Errors and alarms get their meaning appended."""
     why = _explain(line)
+    line = _tidy(line)
     return f'  "{line}"  — {why}' if why else f'  "{line}"'
 
 
@@ -123,6 +141,7 @@ Commands:
   run           Stream the loaded file
   mdi           Enter MDI mode (send gcode commands directly)
   settings      Show GRBL $$ settings in readable form
+                (caPy: settings GROUP for one group, settings all for every setting)
   params        Show GRBL $# coordinate parameters
   unlock        Unlock GRBL alarm state ($X)
   home          Run homing cycle ($H)
@@ -161,7 +180,46 @@ def _is_capy(streamer: Streamer) -> bool:
     return any(l.startswith("[VER:") and "capy" in l.lower() for l in lines)
 
 
-def _print_settings(streamer: Streamer) -> None:
+def _print_capy_settings(streamer: Streamer, cmd: str) -> None:
+    """Show a caPy settings reply as sent: it is already self-describing
+    ("$key=value ; meaning", "; --- group ---" headers, [$:...] rows)."""
+    lines: list[str] = []
+    streamer.send_command_verbose(cmd, on_line=lines.append)
+    if lines and lines[-1].startswith("error:8"):
+        print(f"  {cmd} needs the machine Idle — wait for Idle and retry"
+              " (settings GROUP works any time).")
+        return
+    rows = False
+    for line in lines:
+        if line == "ok":
+            continue
+        if line.startswith("error"):
+            print(_grbl(line))
+        elif line.startswith(";"):
+            print(f"  {line[1:].strip()}")
+        else:
+            rows = rows or line.startswith("$")
+            print(f"  {_tidy(line)}")
+    if rows:
+        print("  (* = applies at the next reset, ** = at the next boot: $save then $reboot;"
+              " change one in mdi with $key=value)")
+
+
+def _print_settings(streamer: Streamer, arg: str = "") -> None:
+    """GRBL's $$ in readable form. On caPy, also its setting groups;
+    `settings GROUP` lists one group and `settings all` every setting."""
+    capy = _is_capy(streamer)
+    if arg:
+        print()
+        if not capy:
+            print("  settings GROUP / all are caPy only; GRBL has just $$.")
+        elif arg.lower() == "all":
+            _print_capy_settings(streamer, "$settings.all")
+        else:
+            _print_capy_settings(streamer, "$settings." + arg)
+        print()
+        return
+
     raw_lines: list[str] = []
     streamer.send_command_verbose("$$", on_line=raw_lines.append)
 
@@ -193,15 +251,10 @@ def _print_settings(streamer: Streamer) -> None:
     print()
 
     # caPy keeps its full set under named group.name keys; $$ above is only the
-    # GRBL-numbered subset. Its $settings report is already self-describing
-    # ("$key=value ; meaning"), so show it as sent.
-    if _is_capy(streamer):
-        named: list[str] = []
-        streamer.send_command_verbose("$settings", on_line=named.append)
-        print("  caPy settings ($settings) — change one in mdi with $key=value:")
-        for line in named:
-            if line != "ok":
-                print(f"  {line}")
+    # GRBL-numbered subset. Show the group map, not the long full dump.
+    if capy:
+        _print_capy_settings(streamer, "$settings")
+        print("  settings GROUP lists one group, settings all every setting.")
         print()
 
 
@@ -285,7 +338,8 @@ def _mdi_loop(streamer: Streamer, cfg: StatusConfig) -> None:
             if greeting:
                 print(_grbl(greeting))
         else:
-            streamer.send_command_verbose(line, on_line=lambda l: print(_grbl(l)))
+            streamer.send_command_verbose(line, on_line=lambda l: print(_grbl(l)),
+                                          read_timeout=120 if _holds_ok(line) else None)
             # gcgo converts units itself, so reports must stay in mm.
             if line.replace(" ", "").startswith("$13="):
                 _report_mm(streamer)
@@ -660,7 +714,7 @@ def _repl(streamer: Streamer, cfg: StatusConfig) -> None:
                 _run_mdi(streamer, cfg)
 
             elif cmd == "settings":
-                _print_settings(streamer)
+                _print_settings(streamer, arg.strip())
 
             elif cmd == "params":
                 _print_params(streamer)

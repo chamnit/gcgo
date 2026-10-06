@@ -116,6 +116,7 @@ progress::-moz-progress-bar{ background:var(--grn); }
 #log .rx{ color:#b9c2d0; }
 #log .err{ color:var(--red); }
 #log .sys{ color:var(--mut); font-style:italic; }
+#log .qr{ display:block; width:max-content; color:#000; background:#fff; line-height:1; }
 .console-in{ display:flex; gap:.45rem; margin-top:.55rem; }
 .console-in input{ flex:1; }
 .quick{ margin-top:.5rem; }
