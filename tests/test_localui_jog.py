@@ -63,7 +63,7 @@ def test_capy_detents_become_steps(ui, port):
     assert sent(port) == ["$J"]
     port.feed("ok\r\n")
     ui.tick()
-    assert sent(port)[1:] == ["$jog.keepalive", "S X2 F800"]   # the detents, summed
+    assert sent(port)[1:] == ["$settings.jog", "S X2 F800"]   # the detents, summed
 
 
 def test_detents_past_the_lead_are_dropped(ui, port):

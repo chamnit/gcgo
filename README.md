@@ -117,22 +117,28 @@ into a desktop loop or an MCU loop unchanged.
 
 ### Jogging
 
-Continuous jogging uses caPy's jog mode (bare `$J`, then `V`/`S`/`T` lines).
-`gcgo/core/jog.py`'s `JogSession` is the only code that talks to it; input
-devices never write to the wire. An input module reads its device and calls
-one of:
+Continuous jogging uses caPy's jog mode (bare `$J`, then `U`/`V`/`S`/`T`
+lines; see caPy's `doc/jog/README.md`). `gcgo/core/jog.py`'s `JogSession` is
+the only code that talks to it; input devices never write to the wire. An
+input module reads its device and calls one of:
 
 ```python
 jog.vel("gamepad", vx, vy, vz)    # mm/s, every time the device is read
 jog.step("Z", 0.1, feed=300)      # handwheel detents, step buttons
-jog.target(x=0, y=0, feed=3000)   # go-to, follower setpoints
+jog.target(x=0, y=0, feed=3000)   # go-to (machine coordinates)
+jog.target(x=px, vx=pv)           # a moving target (follower), every reading
 jog.release("gamepad")            # device gone
 ```
 
 and the driver loop calls `jog.tick()` each pass. The session enters jog mode
 when asked (`begin()`) and leaves on `end()`. It sends only the newest
-velocity and repeats it inside caPy's `$jog.keepalive`. Each input owns the
-axes it pushes, and an input that stops refreshing is zeroed after its TTL.
+velocity, as a `U` line naming every moving axis, and repeats it inside caPy's
+per-axis dead-man (read from `$jog.keepalive` and `$jog.cover` on entry). So a
+stick never disturbs a step or target on another axis: a stick on X/Y and a
+handwheel on Z run together. Each input owns the axes it pushes, and an input
+or moving target that stops refreshing is zeroed after its TTL. On a caPy
+without `U` (before 907d191) it falls back to `V`, and steps and targets wait
+until no velocity is live.
 `gcgo/core/jogmap.py` holds the shared feel: `stick_to_velocity` (radial
 deadband, square-law magnitude, direction kept) and a shuttle-ring table. The
 web UI's virtual stick is the first input. It enters jog mode on the first
