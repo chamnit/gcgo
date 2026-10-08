@@ -215,7 +215,8 @@ class JogSession:
         if self.state == ENTERING:
             self.state = OFF if err else ON
             self._on_seq = self.s._status_seq
-            if err:
+            if err:   # drop what waited for the session: it must not move later
+                self._clear()
                 self._retry_at = now_ms() + RETRY_MS
             self._event("jog mode refused: " + line if err else "jog mode on")
         elif err:

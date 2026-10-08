@@ -45,6 +45,9 @@ class SimStreamer:
         self.gc_collect = False
         self._stop = False
 
+    @property
+    def active(self): return self.state == RUNNING
+
     def connect(self): return ""
     def service(self): pass
     def request_status(self): pass

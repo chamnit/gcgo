@@ -154,6 +154,12 @@ replug-safe). Xbox-style layout:
 | LB / RB | slower / faster speed range (5, 20, 50, 100 % of the feed) |
 | B | stop: brake and leave jog mode (the sticks need centring before they jog again) |
 
+**Local UI wheel** (OLED pendant): on caPy each encoder detent is a
+`jog.step()`. Detents add up and land exactly, and a wheel spun faster than the
+axis can follow drops detents once the axis is about 2 detents (at least 2 mm)
+behind, so the axis stops when the hand stops. On GRBL it sends one `$J=` per
+detent, as before.
+
 Every input has the same shape: an object whose `poll(jog)` is called on
 every driver pass (`serve(..., inputs=[...])`). A different device needs only a
 reader that returns the same snapshot (`axes`, `buttons`, `pressed`).

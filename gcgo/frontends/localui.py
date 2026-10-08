@@ -10,6 +10,9 @@ Controls -- 4 buttons (X, Y, Z, Menu) + rotary encoder (turn + click):
 
   JOG (home)   X/Y/Z = pick axis;  long-press axis = zero it
                turn = jog active axis by step;  click = cycle step size
+               (on caPy the wheel drives a jog-mode session, core/jog.py:
+               detents add up and land exactly, and a wheel spun faster than
+               the axis can follow drops detents instead of running on)
                Menu = open the menu
   MENU         turn = scroll;  click = select;  Menu = back to jog
                items: Files, Home ($H), Unlock ($X), Units, Reset
@@ -27,6 +30,7 @@ import os
 from gcgo.core.clock import now_ms, diff_ms
 from gcgo.core.config import REPORT_MM
 from gcgo.core.gcode import validate_gcode
+from gcgo.core.jog import JogSession
 from gcgo.core.protocol import FINISHING
 
 # 1-bit OLED palette: off (background) and on (lit pixel). Highlight = an
@@ -38,6 +42,11 @@ AXES = ("X", "Y", "Z")
 STEPS = (0.1, 1.0, 10.0, 100.0)
 MENU = ("files", "home", "unlock", "units", "reset")
 _GCODE_EXT = (".gcode", ".nc", ".g", ".gc", ".ngc")
+DIAL_LEAD_MM = 2.0     # how far the wheel may run ahead of the axis (at least 2 detents)
+DIAL_LAG_S = 0.15      # + the jog feed times this: the reported position is this old, worst case
+JOG_IDLE_MS = 1500     # leave jog mode this long after the last detent, once on target
+JOG_POLL_MS = 50       # status poll while jogging (the lead check reads the position)
+AFTER_JOG_MS = 3000    # give up waiting for Idle after leaving jog mode
 
 
 def _is_gcode(n):
@@ -98,10 +107,21 @@ class LocalUI:
         self._poll_at = 0
         self.s.gc_collect = True
 
+        # caPy jog mode for the wheel; GRBL keeps one $J= per detent
+        self.jog = JogSession(streamer)
+        self._capy = False
+        self._dial_target = None   # where the wheel has sent each axis (machine mm)
+        self._dial_at = 0
+        self._after_jog = None     # an action waiting for jog mode to end
+        self._after_seq = 0
+        self._after_at = 0
+
     # ---- lifecycle ----
     def begin(self):
-        self.s.connect()
+        self._capy = "capy" in self.s.connect().lower()
+        self.s.on_message = self._on_message
         self.s.write_line(REPORT_MM)
+        self.s.write_line("$I")    # caPy answers [VER:...:caPy]
         self._refresh_files()
         self._dirty = True
 
@@ -115,9 +135,14 @@ class LocalUI:
             self._end_run()
         else:
             self.s.service()
+            self.jog.tick()
+            self._jog_service()
             if diff_ms(now_ms(), self._poll_at) >= 0:
                 self.s.request_status()
-                self._poll_at = now_ms() + int((self.cfg.rate or 0.5) * 1000)
+                ms = int((self.cfg.rate or 0.5) * 1000)
+                if self.jog.active:
+                    ms = min(ms, JOG_POLL_MS)
+                self._poll_at = now_ms() + ms
         for ev in self.inp.poll():
             self._on_event(ev)
         sig = self._status_sig()
@@ -139,11 +164,10 @@ class LocalUI:
         if ev in ("x", "y", "z"):
             self.axis_i = "xyz".index(ev)
         elif ev in ("x_hold", "y_hold", "z_hold"):
-            self.s.write_line("G10 L20 P0 %s0" % ev[0].upper())
+            line = "G10 L20 P0 %s0" % ev[0].upper()
+            self._machine(lambda: self.s.write_line(line))
         elif ev in ("cw", "ccw"):
-            sign = "" if ev == "cw" else "-"
-            self.s.write_line("$J=G91 G21 %s%s%g F%d" % (
-                AXES[self.axis_i], sign, STEPS[self.step_i], self.jog_feed))
+            self._dial(1 if ev == "cw" else -1)
         elif ev == "click":
             self.step_i = (self.step_i + 1) % len(STEPS)
         elif ev == "menu":
@@ -211,10 +235,10 @@ class LocalUI:
             self._refresh_files()
             self.mode = "files"
         elif key == "home":
-            self.s.write_line("$H")
+            self._machine(lambda: self.s.write_line("$H"))
             self.mode = "jog"
         elif key == "unlock":
-            self.s.write_line("$X")
+            self._machine(lambda: self.s.write_line("$X"))
             self.mode = "jog"
         elif key == "units":
             self.cfg.units = "inch" if self.cfg.units == "mm" else "mm"
@@ -224,6 +248,8 @@ class LocalUI:
                 except OSError:
                     pass
         elif key == "reset":
+            self.jog.lost()          # a reset ends jog mode on the controller
+            self._after_jog = None
             self.s.request_reset()
             self.mode = "jog"
 
@@ -234,6 +260,9 @@ class LocalUI:
         self.top = 0
 
     def _do_run(self, rel):
+        if self.jog.active:
+            self._machine(lambda: self._do_run(rel))
+            return
         path = self.gdir + "/" + rel
         try:
             self.total = validate_gcode(path)
@@ -243,6 +272,65 @@ class LocalUI:
         self.loaded = rel
         self.s.begin(path, status_interval=self.cfg.rate)
         self.mode = "run"
+
+    # ---- the wheel (jog) ----
+    def _on_message(self, m):
+        if m.startswith("[VER:") and "capy" in m.lower():
+            self._capy = True
+
+    def _dial(self, sign):
+        """One detent. On caPy: a step in the jog session, unless the axis is
+        already DIAL_LEAD_MM (or two detents) behind the wheel -- then the
+        detent is dropped, so a hard spin stops when the hand stops. The
+        position comes from status reports, so the allowance also covers what
+        the axis travels while a report is on its way (DIAL_LAG_S)."""
+        d = sign * STEPS[self.step_i]
+        ax = self.axis_i
+        if not self._capy:
+            self.s.write_line("$J=G91 G21 %s%g F%d" % (AXES[ax], d, self.jog_feed))
+            return
+        # the lead check reads the position: poll at the jog rate from now on
+        # (the idle schedule may be a second away)
+        if diff_ms(self._poll_at, now_ms()) > JOG_POLL_MS:
+            self._poll_at = now_ms()
+        mpos = self.s.status.mpos
+        if not self.jog.active or self._dial_target is None:
+            self._dial_target = [mpos[0], mpos[1], mpos[2]]
+        lead = max(DIAL_LEAD_MM, 2 * abs(d)) + self.jog_feed / 60.0 * DIAL_LAG_S
+        if abs(self._dial_target[ax] + d - mpos[ax]) > lead:
+            return
+        self._dial_target[ax] += d
+        self._dial_at = now_ms()
+        self.jog.begin()
+        self.jog.step(AXES[ax], d, feed=self.jog_feed)
+
+    def _on_target(self):
+        t, m = self._dial_target, self.s.status.mpos
+        return t is None or all(abs(t[i] - m[i]) < 0.002 for i in range(3))
+
+    def _machine(self, action):
+        """Run `action` (a command that needs the machine) now, or -- in jog
+        mode, where caPy refuses g-code -- after leaving it and reaching Idle."""
+        if not self.jog.active:
+            action()
+            return
+        self.jog.end()
+        self._dial_target = None
+        self._after_jog = action
+        self._after_seq = self.s._status_seq
+        self._after_at = now_ms()
+
+    def _jog_service(self):
+        if self._after_jog and not self.jog.active:
+            fresh = self.s._status_seq > self._after_seq
+            if ((fresh and self.s.status.state.startswith("Idle"))
+                    or diff_ms(now_ms(), self._after_at) > AFTER_JOG_MS):
+                action, self._after_jog = self._after_jog, None
+                action()
+        elif (self.jog.active and diff_ms(now_ms(), self._dial_at) > JOG_IDLE_MS
+              and self._on_target()):
+            self.jog.end()
+            self._dial_target = None
 
     def _end_run(self):
         if self.s.state != "done" and self.s.sent_any:
