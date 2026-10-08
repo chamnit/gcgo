@@ -10,7 +10,10 @@ caPy's jog mode (bare `$J`, from Idle) takes text commands, each answered
     R<frac>                rate knob: scales V/S/T speeds (not distances)
 
 0x85 exits (brake to rest, re-seed). A live velocity needs a fresh V line
-within $jog.keepalive (default 250 ms) or caPy brakes it to rest itself.
+within $jog.keepalive (default 250 ms, settable 20..5000, fixed while in jog
+mode) or caPy brakes it to rest itself and sends
+[MSG:Jog stopped -- no V line within jog.keepalive]. The session reads the
+setting on entry and resends a held velocity well inside it.
 
 Input devices never write to the wire. They hand this session what the
 operator wants -- a velocity vector, a step, a target -- and the session turns
@@ -44,7 +47,9 @@ ENTERING = "entering"  # $J sent, waiting for its ok
 ON = "on"              # in jog mode
 
 MAX_INFLIGHT = 2       # jog lines awaiting ok (each is < 40 bytes of the 127-byte RX)
-KEEPALIVE_MS = 100     # re-send a live V this often (caPy's default window is 250 ms)
+KEEPALIVE_MS = 100     # re-send a live V at most this far apart...
+KEEPALIVE_FRAC = 0.4   # ...and within this fraction of caPy's $jog.keepalive
+KEEPALIVE_MIN_MS = 15
 SOURCE_TTL_MS = 400    # a velocity input not refreshed this long is zeroed
 RETRY_MS = 500         # after a refused $J (still braking, alarm), wait this long
 
@@ -71,6 +76,8 @@ class JogSession:
         self._knobs = []              # pending one-shot lines ("C1", "R0.5")
         self._on_seq = 0              # status-report count when jog mode came on
         self._retry_at = 0            # no new $J before this (after a refusal)
+        self.resend_ms = KEEPALIVE_MS # live-V resend interval, from $jog.keepalive
+        self._asking = False          # the $jog.keepalive query is in flight
         streamer.jog = self           # Streamer routes our replies here
 
     # --- lifecycle ---
@@ -178,7 +185,7 @@ class JogSession:
         while self.inflight < MAX_INFLIGHT:
             if self._knobs:
                 self._write(self._knobs.pop(0))
-            elif v != self._sent_v or (live and diff_ms(now, self._v_at) >= KEEPALIVE_MS):
+            elif v != self._sent_v or (live and diff_ms(now, self._v_at) >= self.resend_ms):
                 words = " ".join(AXES[i] + _num(v[i]) for i in range(3) if v[i] != 0.0)
                 self._write("V " + words if words else "V")
                 self._sent_v = v
@@ -212,9 +219,14 @@ class JogSession:
         if self.inflight:
             self.inflight -= 1
         err = line.startswith("error")
+        if self._asking:                  # a caPy without the setting: keep the default
+            self._asking = False
+            return
         if self.state == ENTERING:
             self.state = OFF if err else ON
             self._on_seq = self.s._status_seq
+            if not err:
+                self._knobs.insert(0, "$jog.keepalive")
             if err:   # drop what waited for the session: it must not move later
                 self._clear()
                 self._retry_at = now_ms() + RETRY_MS
@@ -222,11 +234,31 @@ class JogSession:
         elif err:
             self._event("jog line refused: " + line)
 
+    def note(self, line: str) -> bool:
+        """A non-ok line from the controller while in jog mode (routed by
+        Streamer). True = it was the session's own and is not shown."""
+        if line.startswith("$jog.keepalive="):
+            try:
+                ka = int(float(line.split("=", 1)[1].split(";", 1)[0]))
+            except ValueError:
+                return True
+            self.resend_ms = (KEEPALIVE_MS if ka <= 0 else
+                              max(KEEPALIVE_MIN_MS, min(KEEPALIVE_MS, int(ka * KEEPALIVE_FRAC))))
+            return True
+        if line.startswith("[MSG:Jog stopped"):
+            # caPy braked a velocity that went unrefreshed (a stalled loop or
+            # link); if the input is still held, the next tick resends it
+            self._sent_v = (0.0, 0.0, 0.0)
+            self._event("caPy braked the jog: no V within $jog.keepalive")
+        return False
+
     # --- internals ---
 
     def _write(self, line):
         self.s._send_raw(line)
         self.inflight += 1
+        if line == "$jog.keepalive":
+            self._asking = True
 
     def _event(self, text):
         if self.on_event:

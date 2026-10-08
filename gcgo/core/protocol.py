@@ -491,8 +491,14 @@ class Streamer:
                 if self.on_message:
                     self.on_message(msg)
             else:                                      # [MSG:...], ALARM:, etc.
+                msg = None
+                if self.jog is not None and self.jog.active:
+                    msg = self._rx[start:end].decode("utf-8", "replace")
+                    if self.jog.note(msg):             # the session's own reply
+                        continue
                 if self.on_message:
-                    self.on_message(self._rx[start:end].decode("utf-8", "replace"))
+                    self.on_message(msg if msg is not None else
+                                    self._rx[start:end].decode("utf-8", "replace"))
         self._compact_rx()
 
     # --- async-friendly non-blocking command surface (web/uasyncio) ---

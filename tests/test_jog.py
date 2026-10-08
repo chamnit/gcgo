@@ -1,16 +1,22 @@
 from gcgo.core.jog import ENTERING, KEEPALIVE_MS, OFF, ON, RETRY_MS, JogSession
 
+KA_LINE = "$jog.keepalive=%d             ; ms in $J jog mode a V velocity lasts ..."
+
 
 def answer(port, streamer, *replies):
     port.feed("".join(r + "\r\n" for r in replies))
     streamer.service()
 
 
-def on_session(port, streamer, clock, events=None):
+def on_session(port, streamer, clock, events=None, keepalive=250):
+    """Enter jog mode and answer the session's $jog.keepalive query."""
     j = JogSession(streamer, on_event=(events.append if events is not None else None))
     j.begin()
     answer(port, streamer, "ok")
     assert j.state == ON
+    j.tick()
+    assert port.lines()[-1] == "$jog.keepalive"
+    answer(port, streamer, KA_LINE % keepalive, "ok")
     port.out.clear()
     return j
 
@@ -25,7 +31,7 @@ def test_begin_waits_for_ok(port, streamer, clock):
     answer(port, streamer, "ok")
     assert j.state == ON
     j.tick()
-    assert port.lines()[-1] == "V X5"
+    assert port.lines()[-2:] == ["$jog.keepalive", "V X5"]
 
 
 def test_jog_replies_do_not_reach_the_frontend(port, streamer, clock):
@@ -157,3 +163,53 @@ def test_controller_leaving_jog_mode_is_noticed(port, streamer, clock):
     answer(port, streamer, "<Alarm|MPos:0,0,0|FS:0,0>")
     j.tick()
     assert j.state == OFF and "ended by the controller (Alarm)" in events[-1]
+
+
+def test_resend_follows_jog_keepalive(port, streamer, clock):
+    j = on_session(port, streamer, clock, keepalive=50)
+    assert j.resend_ms == 20                     # 40 % of 50 ms
+    j.vel("s", 3, 0, 0, ttl_ms=0)
+    j.tick()
+    answer(port, streamer, "ok")
+    clock.advance(20)
+    j.tick()
+    assert port.lines() == ["V X3", "V X3"]
+
+
+def test_keepalive_bounds(port, streamer, clock):
+    assert on_session(port, streamer, clock, keepalive=5000).resend_ms == KEEPALIVE_MS
+    assert on_session(port, streamer, clock, keepalive=20).resend_ms == 15
+    assert on_session(port, streamer, clock, keepalive=0).resend_ms == KEEPALIVE_MS   # off
+
+
+def test_keepalive_reply_is_not_shown(port, streamer, clock):
+    shown = []
+    streamer.on_message = shown.append
+    streamer.on_response = lambda i, r: shown.append(r)
+    on_session(port, streamer, clock)
+    assert shown == []
+
+
+def test_capy_without_the_setting(port, streamer, clock):
+    events = []
+    j = JogSession(streamer, on_event=events.append)
+    j.begin()
+    answer(port, streamer, "ok")
+    j.tick()
+    answer(port, streamer, "error:223 ; Invalid setting name")
+    assert j.state == ON and j.resend_ms == KEEPALIVE_MS
+    assert events == ["jog mode on"]             # no "refused" noise
+
+
+def test_capy_braking_a_held_stick_resends_at_once(port, streamer, clock):
+    events = []
+    shown = []
+    streamer.on_message = shown.append
+    j = on_session(port, streamer, clock, events)
+    j.vel("s", 6, 0, 0, ttl_ms=0)
+    j.tick()
+    answer(port, streamer, "ok")
+    answer(port, streamer, "[MSG:Jog stopped -- no V line within jog.keepalive]")
+    j.tick()
+    assert port.lines() == ["V X6", "V X6"]      # not waiting for the next resend
+    assert "braked" in events[-1] and shown      # the controller's words still shown
