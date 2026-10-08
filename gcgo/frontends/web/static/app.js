@@ -127,6 +127,50 @@ function jog(...pairs) {
   g += " F" + (parseFloat($("jogfeed").value) || 1000);
   mdi(g);
 }
+// Virtual sticks (caPy jog mode). While a stick is held, send its deflection
+// 20 times a second -- complete state, newest wins: a dropped frame is harmless
+// and the server zeroes a stick that goes quiet. Letting go sends one zero.
+const stickv = { x: 0, y: 0, z: 0 };
+let stickTimer = null;
+function stickSend() {
+  send({ cmd: "jog_vel", x: stickv.x, y: stickv.y, z: stickv.z,
+         f: parseFloat($("jogfeed").value) || 1000 });
+}
+function stickPad(id, axes) {
+  const pad = $(id), knob = pad.firstElementChild;
+  const move = (e) => {
+    const r = pad.getBoundingClientRect();
+    const hw = r.width / 2, hh = r.height / 2, travel = Math.min(hw, hh);
+    let dx = axes[0] ? (e.clientX - r.left - hw) / travel : 0;
+    let dy = (e.clientY - r.top - hh) / (axes[0] ? travel : hh - travel / 2);
+    const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; }
+    knob.style.transform = "translate(" + dx * travel + "px," +
+                           dy * (axes[0] ? travel : hh - travel / 2) + "px)";
+    if (axes[0]) { stickv.x = dx; stickv.y = -dy; } else stickv.z = -dy;
+  };
+  const up = () => {
+    pad.classList.remove("held");
+    knob.style.transform = "";
+    if (axes[0]) { stickv.x = 0; stickv.y = 0; } else stickv.z = 0;
+    if (!document.querySelector(".stick.held")) { clearInterval(stickTimer); stickTimer = null; }
+    stickSend();
+  };
+  pad.addEventListener("pointerdown", (e) => {
+    if (running) return;
+    pad.setPointerCapture(e.pointerId);
+    pad.classList.add("held");
+    move(e);
+    stickSend();
+    if (!stickTimer) stickTimer = setInterval(stickSend, 50);
+  });
+  pad.addEventListener("pointermove", (e) => { if (pad.classList.contains("held")) move(e); });
+  pad.addEventListener("pointerup", up);
+  pad.addEventListener("pointercancel", up);
+}
+stickPad("stickxy", [true]);
+stickPad("stickz", [false]);
+
 function zero(...axes) {
   mdi("G10 L20 P0 " + axes.map((a) => a + "0").join(" "));
 }

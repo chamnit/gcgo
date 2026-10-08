@@ -77,6 +77,17 @@ button:disabled{ opacity:.4; cursor:not-allowed; }
 .jcol input{ width:5rem; }
 .zbtns{ display:flex; flex-direction:column; gap:.3rem; }
 .zbtns button{ min-width:3.6rem; padding:.35rem .9rem; font-size:.84rem; }
+/* virtual sticks: a round X/Y pad and a vertical Z track; the knob springs back */
+.stickrow{ display:flex; gap:.9rem; align-items:center; margin-top:.9rem; flex-wrap:wrap; }
+.stick{ position:relative; width:9.5rem; height:9.5rem; border-radius:50%; touch-action:none;
+        background:radial-gradient(circle,var(--panel2) 0 30%,var(--panel) 31%);
+        border:1px solid var(--line); cursor:grab; user-select:none; }
+.stick.zstick{ width:3rem; border-radius:1.5rem; }
+.stick .knob{ position:absolute; left:50%; top:50%; width:2.6rem; height:2.6rem; margin:-1.3rem;
+              border-radius:50%; background:var(--accent2); border:2px solid var(--accent);
+              pointer-events:none; }
+.stick.held{ border-color:var(--accent); cursor:grabbing; }
+.sticknote{ color:var(--mut); font-size:.75rem; max-width:16rem; line-height:1.4; }
 /* horizontal segmented (settings) and vertical segmented (jog step) */
 .seg{ display:flex; gap:.3rem; flex-wrap:wrap; }
 .seg button{ flex:1; min-width:2.6rem; padding:.4rem .2rem; font-size:.82rem; }

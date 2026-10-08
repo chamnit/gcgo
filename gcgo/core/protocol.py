@@ -55,6 +55,9 @@ class Streamer:
         self.gc_collect = False
         self._gc_at = 0
         self.status = GRBLStatus()
+        # A JogSession sets itself here: while it has lines awaiting an answer,
+        # the next ok/error is its own (core/jog.py), not an MDI reply.
+        self.jog = None
         self._reset_stream()
 
     def _reset_stream(self) -> None:
@@ -468,6 +471,9 @@ class Streamer:
                 continue
             c0 = self._rx[start]
             if c0 == 0x6f or c0 == 0x65:              # 'o'k / 'e'rror
+                if not streaming and self.jog is not None and self.jog.inflight:
+                    self.jog.reply(self._rx[start:end].decode("utf-8", "replace"))
+                    continue
                 if streaming:
                     self._ack()
                 if self.on_response:

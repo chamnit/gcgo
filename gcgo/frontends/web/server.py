@@ -15,12 +15,15 @@ except ImportError:                      # MicroPython <1.20
 from gcgo.core.clock import diff_ms, now_ms
 from gcgo.core.config import REPORT_MM
 from gcgo.core.gcode import validate_gcode
+from gcgo.core.jog import JogSession
+from gcgo.core.jogmap import stick_to_velocity
 from gcgo.core.protocol import FINISHING, RUNNING
 from gcgo.core.tables import ACTION_METHOD
 from gcgo.frontends.web import ws as wsproto
 
 _CT = {"html": "text/html", "js": "application/javascript", "css": "text/css",
        "json": "application/json"}
+JOG_IDLE_MS = 3000   # leave jog mode after this long with nothing moving
 _GCODE_EXT = (".gcode", ".nc", ".g", ".gc", ".ngc")
 
 
@@ -106,6 +109,9 @@ class WebServer:
         self._job = False      # a run was started and its end hasn't been handled
         self.s.on_response = self._on_response
         self.s.on_message = self._on_message
+        self.jog = JogSession(streamer, on_event=lambda t: self.broadcast(
+            {"type": "msg", "line": t}))
+        self._jog_rest_at = 0  # when the jog last had motion (for the idle end)
         self.s.gc_collect = True
         self.s.write_line(REPORT_MM)
 
@@ -176,8 +182,15 @@ class WebServer:
                 if m:
                     getattr(self.s, m)()
         elif c == "reset":
+            self.jog.lost()         # a reset ends jog mode on the controller
             self.s.request_reset()
+        elif c == "jog_vel":
+            self._jog_vel(cmd)
+        elif c == "jog_end":
+            self.jog.end()
         elif c == "mdi":
+            if self._jog_blocks():
+                return
             if not self.s.active:   # no MDI while a job is running or draining
                 line = cmd.get("line", "")
                 self.s.write_line(line)
@@ -225,8 +238,34 @@ class WebServer:
         elif c == "files":
             self.broadcast(self.list_dir(cmd.get("dir", "")))
 
+    def _jog_vel(self, cmd):
+        """A virtual-stick frame: x/y/z deflection -1..1 and the jog feed
+        (mm/min) at full deflection. The first frame enters jog mode."""
+        if self.s.active:
+            return
+        try:
+            x, y, z = (max(-1.0, min(1.0, float(cmd.get(k) or 0))) for k in "xyz")
+            f = float(cmd.get("f") or 1000)
+        except (TypeError, ValueError):
+            return
+        v = stick_to_velocity(x, y, z, speed=f / 60.0)
+        if v != (0.0, 0.0, 0.0):
+            self.jog.begin()            # no-op once on
+        self.jog.vel("web", *v)
+
+    def _jog_blocks(self):
+        """caPy refuses g-code in jog mode: end the session first, and drop
+        this command (the controller needs a moment to brake and re-seed)."""
+        if not self.jog.active:
+            return False
+        self.jog.end()
+        self.broadcast({"type": "msg", "line": "jog mode ended — send that again"})
+        return True
+
     def _start_run(self, f):
         if self.s.active:   # a job is still running or draining buffered motion
+            return
+        if self._jog_blocks():
             return
         rel = _safe_rel(f or "")
         if not rel:
@@ -302,8 +341,13 @@ class WebServer:
                                 "line": "stream %s (%d lines)" % (st, self.s.sent)})
             else:
                 self.s.service()
-                # poll interval tracks cfg.rate so a settings change takes effect live
+                self.jog.tick()
+                self._jog_idle_end()
+                # poll interval tracks cfg.rate so a settings change takes effect
+                # live; faster while jogging so the DRO follows the stick
                 poll_ms = int((self.cfg.rate or 1.0) * 1000)
+                if self.jog.active:
+                    poll_ms = min(poll_ms, 200)
                 if diff_ms(now_ms(), poll_at) >= 0:
                     self.s.request_status()
                     poll_at = now_ms() + poll_ms
@@ -315,6 +359,15 @@ class WebServer:
             else:
                 self.pending = []
             await asyncio.sleep(0.005)
+
+    def _jog_idle_end(self):
+        """Leave jog mode after JOG_IDLE_MS with no motion asked for, so the
+        machine goes back to Idle and takes g-code again."""
+        if (not self.jog.active or self.jog.velocity() != (0.0, 0.0, 0.0)
+                or self.s.status.feed):   # a step or target still moving
+            self._jog_rest_at = now_ms()
+        elif diff_ms(now_ms(), self._jog_rest_at) >= JOG_IDLE_MS:
+            self.jog.end()
 
     async def _flush(self):
         frames = [wsproto.encode_text(json.dumps(o)) for o in self.pending]

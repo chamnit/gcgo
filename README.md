@@ -115,6 +115,30 @@ gcgo is split so the GRBL "brain" is shared across platforms:
 Streaming is a single-threaded non-blocking `pump()`, so the same core drops
 into a desktop loop or an MCU loop unchanged.
 
+### Jogging
+
+Continuous jogging uses caPy's jog mode (bare `$J`, then `V`/`S`/`T` lines).
+`gcgo/core/jog.py`'s `JogSession` is the only code that talks to it; input
+devices never write to the wire. An input module reads its device and calls
+one of:
+
+```python
+jog.vel("gamepad", vx, vy, vz)    # mm/s, every time the device is read
+jog.step("Z", 0.1, feed=300)      # handwheel detents, step buttons
+jog.target(x=0, y=0, feed=3000)   # go-to, follower setpoints
+jog.release("gamepad")            # device gone
+```
+
+and the driver loop calls `jog.tick()` each pass. The session enters jog mode
+when asked (`begin()`) and leaves on `end()`. It sends only the newest
+velocity and repeats it inside caPy's `$jog.keepalive`. Each input owns the
+axes it pushes, and an input that stops refreshing is zeroed after its TTL.
+`gcgo/core/jogmap.py` holds the shared feel: `stick_to_velocity` (radial
+deadband, square-law magnitude, direction kept) and a shuttle-ring table. The
+web UI's virtual stick is the first input. It enters jog mode on the first
+drag, and the server leaves jog mode after 3 s at rest or when MDI or a run
+needs the machine.
+
 ### Keeping in step with caPy
 
 caPy publishes its wire definitions as CSV (`doc/csv` in the caPy repo). After
