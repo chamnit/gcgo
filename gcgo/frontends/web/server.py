@@ -252,6 +252,7 @@ class WebServer:
         if v != (0.0, 0.0, 0.0):
             self.jog.begin()            # no-op once on
         self.jog.vel("web", *v)
+        self.jog.tick()                 # out now, not on the next driver pass
 
     def _jog_blocks(self):
         """caPy refuses g-code in jog mode: end the session first, and drop

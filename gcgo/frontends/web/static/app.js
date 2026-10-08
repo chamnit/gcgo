@@ -127,14 +127,22 @@ function jog(...pairs) {
   g += " F" + (parseFloat($("jogfeed").value) || 1000);
   mdi(g);
 }
-// Virtual sticks (caPy jog mode). While a stick is held, send its deflection
-// 20 times a second -- complete state, newest wins: a dropped frame is harmless
-// and the server zeroes a stick that goes quiet. Letting go sends one zero.
+// Virtual sticks (caPy jog mode). A stick movement goes out at once (at most
+// one frame per STICK_MIN_MS), and a held stick repeats every 50 ms as its
+// heartbeat -- complete state, newest wins: a dropped frame is harmless and the
+// server zeroes a stick that goes quiet. Letting go sends one zero.
+const STICK_MIN_MS = 16;
 const stickv = { x: 0, y: 0, z: 0 };
-let stickTimer = null;
+let stickTimer = null, stickLast = 0, stickSoon = null;
 function stickSend() {
+  stickLast = performance.now();
   send({ cmd: "jog_vel", x: stickv.x, y: stickv.y, z: stickv.z,
          f: parseFloat($("jogfeed").value) || 1000 });
+}
+function stickSendSoon() {
+  const wait = STICK_MIN_MS - (performance.now() - stickLast);
+  if (wait <= 0) stickSend();
+  else if (!stickSoon) stickSoon = setTimeout(() => { stickSoon = null; stickSend(); }, wait);
 }
 function stickPad(id, axes) {
   const pad = $(id), knob = pad.firstElementChild;
@@ -148,6 +156,7 @@ function stickPad(id, axes) {
     knob.style.transform = "translate(" + dx * travel + "px," +
                            dy * (axes[0] ? travel : hh - travel / 2) + "px)";
     if (axes[0]) { stickv.x = dx; stickv.y = -dy; } else stickv.z = -dy;
+    stickSendSoon();
   };
   const up = () => {
     pad.classList.remove("held");
@@ -161,7 +170,6 @@ function stickPad(id, axes) {
     pad.setPointerCapture(e.pointerId);
     pad.classList.add("held");
     move(e);
-    stickSend();
     if (!stickTimer) stickTimer = setInterval(stickSend, 50);
   });
   pad.addEventListener("pointermove", (e) => { if (pad.classList.contains("held")) move(e); });
