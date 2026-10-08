@@ -139,6 +139,25 @@ web UI's virtual stick is the first input. It enters jog mode on the first
 drag, and the server leaves jog mode after 3 s at rest or when MDI or a run
 needs the machine.
 
+**Gamepad** (Linux, desktop web server): `python -m gcgo.desktop.webmain
+<port> --gamepad [DEV] [--gamepad-feed 3000]`. The bindings are in
+`gcgo/core/gamepad.py` (`GamepadJog`, no I/O), and the reader is in
+`gcgo/desktop/gamepad_linux.py` (the kernel joystick API, standard library only,
+replug-safe). Xbox-style layout:
+
+| control | does |
+|---|---|
+| left stick | X/Y velocity: direction kept, speed by deflection (square law) |
+| right stick | Z velocity, at half the X/Y feed |
+| d-pad / Y, A | step X/Y / Z+, Z- by the step size |
+| X | cycle the step size (0.01, 0.1, 1, 10 mm) |
+| LB / RB | slower / faster speed range (5, 20, 50, 100 % of the feed) |
+| B | stop: brake and leave jog mode (the sticks need centring before they jog again) |
+
+Every input has the same shape: an object whose `poll(jog)` is called on
+every driver pass (`serve(..., inputs=[...])`). A different device needs only a
+reader that returns the same snapshot (`axes`, `buttons`, `pressed`).
+
 ### Keeping in step with caPy
 
 caPy publishes its wire definitions as CSV (`doc/csv` in the caPy repo). After

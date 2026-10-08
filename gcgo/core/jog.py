@@ -46,6 +46,7 @@ ON = "on"              # in jog mode
 MAX_INFLIGHT = 2       # jog lines awaiting ok (each is < 40 bytes of the 127-byte RX)
 KEEPALIVE_MS = 100     # re-send a live V this often (caPy's default window is 250 ms)
 SOURCE_TTL_MS = 400    # a velocity input not refreshed this long is zeroed
+RETRY_MS = 500         # after a refused $J (still braking, alarm), wait this long
 
 
 def _num(v):
@@ -69,6 +70,7 @@ class JogSession:
         self._target = None           # (mask, [x, y, z], feed)
         self._knobs = []              # pending one-shot lines ("C1", "R0.5")
         self._on_seq = 0              # status-report count when jog mode came on
+        self._retry_at = 0            # no new $J before this (after a refusal)
         streamer.jog = self           # Streamer routes our replies here
 
     # --- lifecycle ---
@@ -80,7 +82,7 @@ class JogSession:
     def begin(self) -> None:
         """Enter jog mode. caPy accepts it from Idle only; the answer arrives
         through tick()/reply() (on_event reports a refusal)."""
-        if self.state != OFF:
+        if self.state != OFF or diff_ms(now_ms(), self._retry_at) < 0:
             return
         self.state = ENTERING
         self._write("$J")
@@ -213,6 +215,8 @@ class JogSession:
         if self.state == ENTERING:
             self.state = OFF if err else ON
             self._on_seq = self.s._status_seq
+            if err:
+                self._retry_at = now_ms() + RETRY_MS
             self._event("jog mode refused: " + line if err else "jog mode on")
         elif err:
             self._event("jog line refused: " + line)

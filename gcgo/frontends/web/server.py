@@ -97,7 +97,7 @@ def _query(path):
 
 
 class WebServer:
-    def __init__(self, streamer, cfg, gdir, static_dir, config_file=None):
+    def __init__(self, streamer, cfg, gdir, static_dir, config_file=None, inputs=()):
         self.s = streamer
         self.cfg = cfg
         self.gdir = gdir
@@ -112,6 +112,12 @@ class WebServer:
         self.jog = JogSession(streamer, on_event=lambda t: self.broadcast(
             {"type": "msg", "line": t}))
         self._jog_rest_at = 0  # when the jog last had motion (for the idle end)
+        # jog inputs on this host (a gamepad...): each has poll(jog), called
+        # every driver pass; their messages go to the console
+        self.inputs = list(inputs)
+        for inp in self.inputs:
+            if getattr(inp, "on_event", False) is None:
+                inp.on_event = lambda t: self.broadcast({"type": "msg", "line": t})
         self.s.gc_collect = True
         self.s.write_line(REPORT_MM)
 
@@ -342,6 +348,8 @@ class WebServer:
                                 "line": "stream %s (%d lines)" % (st, self.s.sent)})
             else:
                 self.s.service()
+                for inp in self.inputs:
+                    inp.poll(self.jog)
                 self.jog.tick()
                 self._jog_idle_end()
                 # poll interval tracks cfg.rate so a settings change takes effect
@@ -562,8 +570,9 @@ def _default_static():
 
 
 async def serve(streamer, cfg, gdir, config_file=None, host="0.0.0.0",
-                port=8080, static_dir=None):
-    srv = WebServer(streamer, cfg, gdir, static_dir or _default_static(), config_file)
+                port=8080, static_dir=None, inputs=()):
+    srv = WebServer(streamer, cfg, gdir, static_dir or _default_static(), config_file,
+                    inputs)
     loop = asyncio.get_event_loop()
     loop.create_task(srv.driver())
     server = await asyncio.start_server(srv.handle, host, port)

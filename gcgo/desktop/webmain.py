@@ -20,6 +20,10 @@ def main():
     p.add_argument("-b", "--baud", type=int, default=115200)
     p.add_argument("--http-port", type=int, default=8080)
     p.add_argument("--dir", default=".", help="directory of g-code files to serve")
+    p.add_argument("--gamepad", nargs="?", const="auto", metavar="DEV",
+                   help="jog with a gamepad (Linux, caPy): the first /dev/input/js*, or DEV")
+    p.add_argument("--gamepad-feed", type=float, default=3000.0, metavar="MM_MIN",
+                   help="gamepad X/Y speed at full stick, top range (Z: half)")
     args = p.parse_args()
 
     port = args.port
@@ -42,10 +46,17 @@ def main():
         print(f"Connection failed: {e}")
         sys.exit(1)
 
+    inputs = []
+    if args.gamepad:
+        from gcgo.core.gamepad import GamepadJog
+        from gcgo.desktop.gamepad_linux import LinuxGamepad
+        dev = None if args.gamepad == "auto" else args.gamepad
+        inputs.append(GamepadJog(LinuxGamepad(dev), feed=args.gamepad_feed))
+
     gdir = os.path.abspath(args.dir)
     try:
         asyncio.run(serve(streamer, cfg, gdir, config_file=CONFIG_FILE,
-                          port=args.http_port))
+                          port=args.http_port, inputs=inputs))
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
