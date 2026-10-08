@@ -171,6 +171,17 @@ It regenerates the error/alarm text gcgo shows (`gcgo/core/codes.py` for the
 terminal, `static/codes.json` for the web console) and fails, naming them, if
 caPy now sends a machine state or status-report field gcgo doesn't handle.
 
+### Tests
+
+```
+python3 -m pytest
+```
+
+The tests run the real `Streamer` over a fake serial port, with a clock the
+tests advance by hand, so they need no hardware and don't sleep. The Linux
+gamepad reader tests use a virtual pad through `/dev/uinput` and skip
+themselves where that isn't writable.
+
 ## MicroPython (experimental)
 
 gcgo's core runs on MicroPython 1.2x. A board can act as a standalone GRBL

@@ -20,3 +20,6 @@ gcgo = "gcgo.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["gcgo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
