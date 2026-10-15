@@ -497,6 +497,8 @@ class Streamer:
                     owner = self._owed.pop(0)
                     if owner == "jog" and self.jog is not None:
                         self.jog.reply(self._rx[start:end].decode("utf-8", "replace"))
+                    elif callable(owner):
+                        owner(self._rx[start:end].decode("utf-8", "replace"))
                     elif self.on_response:
                         self.on_response(self._acked,
                                          self._rx[start:end].decode("utf-8", "replace"))
@@ -544,9 +546,10 @@ class Streamer:
         """Non-blocking status request ('?'); reply arrives via service()."""
         self._io.write(b"?")
 
-    def write_line(self, line: str, owner: str = "mdi") -> None:
+    def write_line(self, line: str, owner="mdi") -> None:
         """Non-blocking command send (e.g. MDI); ok/error arrives via service(),
-        to on_response -- or to the JogSession for owner "jog"."""
+        to on_response -- or to the JogSession for owner "jog", or to owner
+        itself if it is a function (owner(reply))."""
         self._send_raw(line)
         self._owed.append(owner)
 

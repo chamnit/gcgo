@@ -6,6 +6,9 @@ states, status-report fields. This reads those files and
 
   * regenerates gcgo/core/codes.py (code -> text, used by the terminal) and
     gcgo/frontends/web/static/codes.json (the same, for the browser console);
+  * regenerates gcgo/frontends/web/static/settings.json, what each setting is
+    (caPy's kind, range, default and meaning; GRBL's $N names) for the web
+    settings editor, which reads the values from the controller;
   * checks that every machine state and status-report field caPy can send is
     one gcgo handles, and exits non-zero naming any it doesn't — that is the
     list of things to go and implement.
@@ -26,7 +29,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from gcgo.core.protocol import _MOVING_STATES  # noqa: E402
-from gcgo.core.tables import GRBL_ERRORS  # noqa: E402
+from gcgo.core.tables import GRBL_ERRORS, GRBL_SETTINGS  # noqa: E402
 
 # Machine states gcgo treats as settled (no motion left to wait for at the end
 # of a job); everything else must be in protocol._MOVING_STATES.
@@ -88,6 +91,16 @@ def main():
         f.write("\n")
     print("caPy %s: %d error codes (%d caPy, %d GRBL-only), %d alarm codes"
           % (rev, len(merged), len(errors), len(merged) - len(errors), len(alarms)))
+
+    # settings: [key, kind, range, default, grbl $N, meaning], in caPy's order
+    settings = rows(src, "settings_en_US.csv")
+    with open(os.path.join(ROOT, "gcgo", "frontends", "web", "static", "settings.json"),
+              "w", encoding="utf-8") as f:
+        json.dump({"capy_rev": rev, "capy": settings,
+                   "grbl": {str(k): list(v) for k, v in sorted(GRBL_SETTINGS.items())}},
+                  f, ensure_ascii=False, separators=(",", ":"))
+        f.write("\n")
+    print("%d caPy settings, %d GRBL settings" % (len(settings), len(GRBL_SETTINGS)))
 
     unknown = []
     for s in states:

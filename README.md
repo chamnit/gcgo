@@ -220,8 +220,11 @@ python3 tools/sync_capy.py            # reads ../caPy/doc/csv
 ```
 
 It regenerates the error/alarm text gcgo shows (`gcgo/core/codes.py` for the
-terminal, `static/codes.json` for the web console) and fails, naming them, if
-caPy now sends a machine state or status-report field gcgo doesn't handle.
+terminal, `static/codes.json` for the web console) and what each setting is
+(`static/settings.json`: caPy's kind, range, default and meaning, and GRBL's
+`$N` names, for the web settings editor, which reads the values themselves
+from the controller), and fails, naming them, if caPy now sends a machine
+state or status-report field gcgo doesn't handle.
 
 ### Tests
 
@@ -262,7 +265,9 @@ jog pad with selectable step/feed, work-zero, all feed/rapid/spindle
 overrides and coolant toggles, a sent/received console with MDI, file
 management (browse, make folders, upload, download, run/stop, delete), and a
 separate settings page (units, poll rate, after-run, which override groups to
-show). The whole stack is a dependency-free `uasyncio` HTTP + WebSocket server
+show, and an editor for the controller's own settings: caPy's `$settings`,
+grouped, with dropdowns for choices and ranges checked before sending, or
+GRBL's `$$`; caPy changes are kept with *Save to flash*, `$save`). The whole stack is a dependency-free `uasyncio` HTTP + WebSocket server
 sharing the same core. Verified on a Raspberry Pi Pico W with GRBL on UART0
 (GP16/17) and a hardware reset line on GP18, through level shifters:
 

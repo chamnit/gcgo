@@ -53,6 +53,19 @@
       </div>
     </div>
   </div>
+
+  <div class="card">
+    <h2>Controller <span class="sub" id="ctlfw"></span></h2>
+    <div class="row ctlbar">
+      <button id="ctlload" onclick="ctlLoad()">⟳ Load</button>
+      <input type="text" id="ctlfilter" placeholder="filter: name or meaning" oninput="ctlRender()">
+      <button id="ctlsave" class="accent" onclick="send({cmd:'ctl_save'})" style="display:none"
+              title="caPy keeps a change until reset; $save writes all settings to flash">Save to flash</button>
+    </div>
+    <div class="hint" id="ctlnote">The controller's own settings: Load reads them (the machine must be idle).
+      A change is sent when you leave the field or press Enter.</div>
+    <div id="ctlrows"></div>
+  </div>
 </div>
 <script src="/settings.js"></script>
 </body>
