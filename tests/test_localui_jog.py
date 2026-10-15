@@ -1,5 +1,5 @@
-"""The local UI's wheel: one $J= per detent on GRBL, a jog-mode session with a
-lead limit on caPy, and machine commands deferred until jog mode has ended."""
+"""The local UI's wheel: a jog session with a lead limit (caPy's jog mode, or
+$J= lines on GRBL), and machine commands deferred until jog mode has ended."""
 
 import pytest
 
@@ -42,20 +42,53 @@ def status(port, state, x):
 
 
 def capy(ui, port):
-    port.feed("[VER:0.1:caPy]\r\nok\r\n")
-    ui.tick()
-    assert ui._capy
+    """Nothing to do: the session finds caPy when its $J is answered ok."""
     port.out.clear()
+
+
+def grbl(ui, port):
+    """The first detent's $J is answered error:3: GRBL."""
+    ui.inp.q += ["cw"]
+    ui.tick()
+    assert sent(port) == ["$J"]
+    port.feed("error:3\r\n")
+    ui.tick()
+    assert ui.jog.grbl
 
 
 def sent(port):
     return [l for l in port.lines() if l != "?"]
 
 
-def test_grbl_keeps_one_jog_line_per_detent(ui, port):
-    ui.inp.q += ["cw", "ccw"]
+def test_grbl_detents_become_short_jogs(ui, port):
+    grbl(ui, port)
+    assert sent(port)[1:] == ["$J=G91 G21 X1 F800"]   # the first detent
+    port.feed("ok\r\n")
+    ui.inp.q += ["cw", "cw"]
+    ui.tick()                                         # read the detents
+    ui.tick()                                         # send them
+    assert sent(port)[-1] == "$J=G91 G21 X2 F800"     # detents add up
+
+
+def test_grbl_detents_past_the_lead_are_dropped(ui, port):
+    status(port, "Idle", 0.0)
     ui.tick()
-    assert sent(port) == ["$J=G91 G21 X1 F800", "$J=G91 G21 X-1 F800"]
+    grbl(ui, port)
+    lead = L.DIAL_LEAD_MM + 800 / 60.0 * L.DIAL_LAG_S
+    ui.inp.q += ["cw"] * 20
+    ui.tick()
+    assert ui._dial_target[0] == pytest.approx(int(lead))
+
+
+def test_grbl_zero_after_the_wheel(ui, port, clock):
+    grbl(ui, port)
+    port.feed("ok\r\n")
+    ui.inp.q += ["x_hold"]
+    ui.tick()
+    assert port.out[-1] == b"\x85"                    # brake what is queued
+    status(port, "Idle", 1.0)
+    ui.tick()
+    assert sent(port)[-1] == "G10 L20 P0 X0"
 
 
 def test_capy_detents_become_steps(ui, port):

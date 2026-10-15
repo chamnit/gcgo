@@ -10,9 +10,10 @@ Controls -- 4 buttons (X, Y, Z, Menu) + rotary encoder (turn + click):
 
   JOG (home)   X/Y/Z = pick axis;  long-press axis = zero it
                turn = jog active axis by step;  click = cycle step size
-               (on caPy the wheel drives a jog-mode session, core/jog.py:
-               detents add up and land exactly, and a wheel spun faster than
-               the axis can follow drops detents instead of running on)
+               (the wheel drives a jog session, core/jog.py -- caPy's jog
+               mode, or short $J= lines on GRBL: detents add up and land
+               exactly, and a wheel spun faster than the axis can follow
+               drops detents instead of running on)
                Menu = open the menu
   MENU         turn = scroll;  click = select;  Menu = back to jog
                items: Files, Home ($H), Unlock ($X), Units, Reset
@@ -107,9 +108,8 @@ class LocalUI:
         self._poll_at = 0
         self.s.gc_collect = True
 
-        # caPy jog mode for the wheel; GRBL keeps one $J= per detent
+        # the wheel's jog session (caPy jog mode, or $J= lines on GRBL)
         self.jog = JogSession(streamer)
-        self._capy = False
         self._dial_target = None   # where the wheel has sent each axis (machine mm)
         self._dial_at = 0
         self._after_jog = None     # an action waiting for jog mode to end
@@ -118,10 +118,8 @@ class LocalUI:
 
     # ---- lifecycle ----
     def begin(self):
-        self._capy = "capy" in self.s.connect().lower()
-        self.s.on_message = self._on_message
+        self.s.connect()
         self.s.write_line(REPORT_MM)
-        self.s.write_line("$I")    # caPy answers [VER:...:caPy]
         self._refresh_files()
         self._dirty = True
 
@@ -274,21 +272,15 @@ class LocalUI:
         self.mode = "run"
 
     # ---- the wheel (jog) ----
-    def _on_message(self, m):
-        if m.startswith("[VER:") and "capy" in m.lower():
-            self._capy = True
-
     def _dial(self, sign):
-        """One detent. On caPy: a step in the jog session, unless the axis is
-        already DIAL_LEAD_MM (or two detents) behind the wheel -- then the
-        detent is dropped, so a hard spin stops when the hand stops. The
-        position comes from status reports, so the allowance also covers what
-        the axis travels while a report is on its way (DIAL_LAG_S)."""
+        """One detent: a step in the jog session, unless the axis is already
+        DIAL_LEAD_MM (or two detents) behind the wheel -- then the detent is
+        dropped, so a hard spin stops when the hand stops. The position comes
+        from status reports, so the allowance also covers what the axis
+        travels while a report is on its way (DIAL_LAG_S). The session finds
+        out on its first $J whether it talks to caPy or GRBL."""
         d = sign * STEPS[self.step_i]
         ax = self.axis_i
-        if not self._capy:
-            self.s.write_line("$J=G91 G21 %s%g F%d" % (AXES[ax], d, self.jog_feed))
-            return
         # the lead check reads the position: poll at the jog rate from now on
         # (the idle schedule may be a second away)
         if diff_ms(self._poll_at, now_ms()) > JOG_POLL_MS:
