@@ -413,7 +413,7 @@ class JogSession:
         self._moving_at = now
 
     def _write(self, line):
-        self.s._send_raw(line)
+        self.s.write_line(line, "jog")
         if line.startswith("$J="):
             self._fifo.append("J")
         else:

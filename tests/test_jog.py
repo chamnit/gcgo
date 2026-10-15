@@ -298,3 +298,39 @@ def test_a_moving_target_drops_a_waiting_go_to(port, streamer, clock):
     answer(port, streamer, *["ok"] * j.inflight)
     j.tick()
     assert not any(l.startswith("T X1") for l in port.lines())
+
+
+def test_an_mdi_reply_in_flight_is_not_taken_as_the_jogs(port, streamer, clock):
+    seen = []
+    streamer.on_response = lambda i, r: seen.append(r)
+    streamer.write_line("G0 X1")                 # MDI, not answered yet
+    j = JogSession(streamer)
+    j.begin()
+    answer(port, streamer, "ok")                 # the G0's
+    assert j.state == "entering" and seen == ["ok"]
+    answer(port, streamer, "error:3")            # the $J's: GRBL
+    assert j.grbl and j.state == ON
+
+
+def test_replies_interleave_by_sender(port, streamer, clock):
+    seen = []
+    streamer.on_response = lambda i, r: seen.append(r)
+    j = on_session(port, streamer, clock)
+    j.vel("s", 2, 0, 0, ttl_ms=0)
+    j.tick()                                     # jog: U
+    streamer.write_line("$pos")                  # mdi
+    j.vel("s", 3, 0, 0, ttl_ms=0)
+    j.tick()                                     # jog: U
+    answer(port, streamer, "ok", "error:9", "ok")
+    assert seen == ["error:9"] and j.inflight == 0
+
+
+def test_a_reset_forgets_unanswered_lines(port, streamer, clock):
+    seen = []
+    streamer.on_response = lambda i, r: seen.append(r)
+    streamer.write_line("G4 P5")
+    streamer.request_reset()
+    j = JogSession(streamer)
+    j.begin()
+    answer(port, streamer, "ok")
+    assert j.state == ON and seen == []

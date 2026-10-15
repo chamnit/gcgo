@@ -55,9 +55,12 @@ class Streamer:
         self.gc_collect = False
         self._gc_at = 0
         self.status = GRBLStatus()
-        # A JogSession sets itself here: while it has lines awaiting an answer,
-        # the next ok/error is its own (core/jog.py), not an MDI reply.
+        # A JogSession sets itself here (core/jog.py). Lines sent outside a
+        # stream are answered in order, so each one's sender is queued here
+        # ("mdi" / "jog") and its ok/error goes back to that sender -- an MDI
+        # reply still on its way when a jog starts is not taken as the jog's.
         self.jog = None
+        self._owed = []
         self._reset_stream()
 
     def _reset_stream(self) -> None:
@@ -269,6 +272,7 @@ class Streamer:
         self.on_response = on_response
         self.on_message = on_message
         self.flush_input()
+        self._owed = []        # their replies were just flushed
         try:
             self._size = _file_size(path)
             self._file = open(path, "rb")
@@ -471,8 +475,13 @@ class Streamer:
                 continue
             c0 = self._rx[start]
             if c0 == 0x6f or c0 == 0x65:              # 'o'k / 'e'rror
-                if not streaming and self.jog is not None and self.jog.inflight:
-                    self.jog.reply(self._rx[start:end].decode("utf-8", "replace"))
+                if self._owed:                         # a line sent outside the stream
+                    owner = self._owed.pop(0)
+                    if owner == "jog" and self.jog is not None:
+                        self.jog.reply(self._rx[start:end].decode("utf-8", "replace"))
+                    elif self.on_response:
+                        self.on_response(self._acked,
+                                         self._rx[start:end].decode("utf-8", "replace"))
                     continue
                 if streaming:
                     self._ack()
@@ -517,18 +526,22 @@ class Streamer:
         """Non-blocking status request ('?'); reply arrives via service()."""
         self._io.write(b"?")
 
-    def write_line(self, line: str) -> None:
-        """Non-blocking command send (e.g. MDI); ok/error arrives via service()."""
+    def write_line(self, line: str, owner: str = "mdi") -> None:
+        """Non-blocking command send (e.g. MDI); ok/error arrives via service(),
+        to on_response -- or to the JogSession for owner "jog"."""
         self._send_raw(line)
+        self._owed.append(owner)
 
     def request_reset(self) -> None:
         """Non-blocking soft-reset; greeting arrives via service()."""
         self._io.write(b"\x18")
+        self._owed = []        # a reset drops lines not yet answered
 
     def request_cancel(self) -> None:
         """Non-blocking abort: feed-hold then soft-reset; output via service()."""
         self._io.write(b"!")
         self._io.write(b"\x18")
+        self._owed = []
 
     def _compact_rx(self) -> None:
         if self._rx_pos > 64:  # compact infrequently, not every pump

@@ -31,6 +31,8 @@ def ui(streamer, port, clock, monkeypatch):
     streamer.connect = lambda: ""
     u = L.LocalUI(streamer, StatusConfig(), ".", Disp(), Inp())
     u.begin()
+    port.feed("ok\r\n" * len(streamer._owed))   # answer the setup lines
+    streamer.service()
     port.out.clear()
     return u
 
