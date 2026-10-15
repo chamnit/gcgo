@@ -85,8 +85,8 @@ class Follower:
 
     def end(self, feed=0.0) -> None:
         """Let go: the machine goes to the last point and stops there."""
-        if self.active and self.pos is not None:
-            self._send(self.pos, (0.0, 0.0, 0.0), feed)
+        if self.active and self.pos is not None and self._rest != self.pos:
+            self._send(self.pos, (0.0, 0.0, 0.0), feed)   # (not again if sent at rest)
         self.active = False
         self.vel = [0.0, 0.0, 0.0]
 

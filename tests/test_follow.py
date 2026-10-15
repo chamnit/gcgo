@@ -127,3 +127,22 @@ def test_a_quiet_pad_is_dropped_without_moving(server, port, streamer, clock):
     n = len(port.out)
     server._jog_idle_end()
     assert not server.follow.active and len(port.out) == n
+
+
+def test_no_repeated_go_to_at_the_end(port, streamer, clock):
+    j = grbl_session(port, streamer, clock)
+    f = Follower(j)
+    f.start((0.0, 0.0, 0.0))
+    f.move(0, 0, feed=1200)
+    clock.advance(16)
+    f.move(0.2, 0, feed=1200)                    # moving
+    j.tick()
+    answer(port, streamer, *["ok"] * j.inflight)
+    for _ in range(10):                          # held still: decays to rest
+        clock.advance(50)
+        f.move(0.2, 0, feed=1200)
+        j.tick()
+        answer(port, streamer, *["ok"] * j.inflight)
+    f.end(feed=1200)
+    j.tick()
+    assert port.lines().count("$J=G53 G90 G21 X0.2 Y0 F1200") == 1

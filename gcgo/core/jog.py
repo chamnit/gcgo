@@ -502,6 +502,8 @@ class JogSession:
             self._write("$J=G91 G21 " + " ".join(words) + " F" + _num(speed * 60))
 
     def _grbl_goto(self, mask, pos, feed):
+        if self._gend and all(self._gend[i] == pos[i] for i in range(3) if mask & (1 << i)):
+            return                             # the queue already ends there
         feed = feed or self.feed
         start = self._gend or self.s.status.mpos
         d2 = 0.0
