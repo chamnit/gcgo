@@ -105,6 +105,24 @@ class Streamer:
                 last = line
         return last
 
+    def unsolicited(self) -> list:
+        """Non-blocking: the complete lines that arrived on their own since the
+        last command (an ALARM from a limit switch, a [MSG:...]), so a prompt
+        can show them as such before its next command reads replies from the
+        same buffer. Status reports among them only update self.status."""
+        while self._io.any():
+            self._rx.extend(self._io.read(self._io.any()))
+        out = []
+        while True:
+            line = self._next_line()
+            if line is None:
+                break
+            if line.startswith("<"):
+                self.status.update(line)
+            elif line:
+                out.append(line)
+        return out
+
     def disconnect(self) -> None:
         self._io.close()
 

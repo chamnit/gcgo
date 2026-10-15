@@ -70,6 +70,17 @@ def _grbl(line: str) -> str:
     return f'  "{line}"  — {why}' if why else f'  "{line}"'
 
 
+def _show_unsolicited(streamer: Streamer) -> None:
+    """Print what the controller sent on its own while the prompt waited (an
+    ALARM from a limit switch...), marked as such, before the next command
+    reads its replies -- otherwise it shows up as that command's reply."""
+    lines = streamer.unsolicited()
+    if lines:
+        print("  [controller, while idle]")
+        for l in lines:
+            print(_grbl(l))
+
+
 def _format_status_line(st: GRBLStatus, progress: str, cfg: StatusConfig) -> str:
     """Compact single-line status for the streaming display.
 
@@ -321,6 +332,7 @@ def _mdi_loop(streamer: Streamer, cfg: StatusConfig) -> None:
         except (EOFError, KeyboardInterrupt):
             print()
             break
+        _show_unsolicited(streamer)
         if not line:
             continue
         if line.lower() == "exit":
@@ -661,6 +673,7 @@ def _repl(streamer: Streamer, cfg: StatusConfig) -> None:
             print()
             break
 
+        _show_unsolicited(streamer)
         if not raw:
             continue
 
