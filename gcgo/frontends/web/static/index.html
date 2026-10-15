@@ -76,12 +76,17 @@
         </div>
       </div>
     </div>
-    <!-- continuous jog (caPy jog mode): drag a stick, let go to stop -->
+    <!-- continuous jog: sticks (velocity) and the follow pad (position) -->
     <div class="stickrow">
       <div class="stick" id="stickxy" title="drag to jog X/Y; let go to stop"><div class="knob"></div></div>
       <div class="stick zstick" id="stickz" title="drag to jog Z; let go to stop"><div class="knob"></div></div>
-      <div class="sticknote">Drag to jog continuously — speed grows with the drag, up to FEED.
-        Let go to stop. caPy only.</div>
+      <div class="follow" id="followxy" title="drag: the machine follows the pointer in X/Y">
+        <div class="mach"></div><div class="dot"></div>
+        <div class="span" id="followspan">±10 mm</div>
+      </div>
+      <div class="sticknote">Sticks: drag to jog continuously — speed grows with the drag, up to FEED.
+        Let go to stop.<br>Follow pad: drag and the machine follows the pointer in X/Y, up to FEED;
+        it stops where you let go. The pad edge is 10 × STEP away.</div>
     </div>
   </div>
 

@@ -26,6 +26,9 @@ function handle(m) {
     setAxis("x", m.wpos[0], m.mpos[0]);
     setAxis("y", m.wpos[1], m.mpos[1]);
     setAxis("z", m.wpos[2], m.mpos[2]);
+    const mm = u === "in" ? 25.4 : 1;
+    machMm = [m.mpos[0] * mm, m.mpos[1] * mm];
+    if (follow.el.classList.contains("held")) followShow();
     $("feed").textContent = m.feed.toFixed(0) + (u === "in" ? " in/m" : " mm/m");
     $("spindle").textContent = m.spindle.toFixed(0) + " rpm";
     $("ovf").textContent = m.ov[0] + "%";
@@ -179,6 +182,65 @@ function stickPad(id, axes) {
 stickPad("stickxy", [true]);
 stickPad("stickz", [false]);
 
+// Follow pad: press and drag, and the machine follows the pointer in X/Y as a
+// moving target (core/follow.py), up to FEED; letting go sends it to the last
+// point. The pad edge is 10 x STEP mm from where the drag began. Frames go out
+// on movement (at most one per STICK_MIN_MS) and every 50 ms while held, the
+// heartbeat; each carries the browser's clock so the server measures the
+// pointer's speed on it, not on arrival times. The ring shows the machine.
+let machMm = null;                       // last machine X/Y in mm, from status
+const follow = { el: $("followxy"), x0: 0, y0: 0, dx: 0, dy: 0, m0: null,
+                 timer: null, last: 0, soon: null };
+follow.scale = () => 10 * step / (follow.el.clientWidth / 2);   // mm per px
+function followSend(end) {
+  follow.last = performance.now();
+  const o = { cmd: "jog_follow", dx: follow.dx, dy: follow.dy, t: follow.last,
+              f: parseFloat($("jogfeed").value) || 1000 };
+  if (end) o.end = true;
+  send(o);
+}
+function followShow() {
+  const el = follow.el, k = follow.scale(), hw = el.clientWidth / 2;
+  const clamp = (v) => Math.max(-hw, Math.min(hw, v));
+  el.querySelector(".dot").style.transform =
+    "translate(" + clamp(follow.dx / k) + "px," + clamp(-follow.dy / k) + "px)";
+  if (follow.m0 && machMm) el.querySelector(".mach").style.transform =
+    "translate(" + clamp((machMm[0] - follow.m0[0]) / k) + "px," +
+    clamp(-(machMm[1] - follow.m0[1]) / k) + "px)";
+}
+(function () {
+  const el = follow.el;
+  const at = (e) => {
+    const k = follow.scale();
+    follow.dx = +((e.clientX - follow.x0) * k).toFixed(3);
+    follow.dy = +(-(e.clientY - follow.y0) * k).toFixed(3);
+    followShow();
+    const wait = STICK_MIN_MS - (performance.now() - follow.last);
+    if (wait <= 0) followSend(false);
+    else if (!follow.soon) follow.soon = setTimeout(() => { follow.soon = null; followSend(false); }, wait);
+  };
+  const up = () => {
+    if (!el.classList.contains("held")) return;
+    el.classList.remove("held");
+    clearInterval(follow.timer); clearTimeout(follow.soon);
+    follow.timer = follow.soon = null;
+    followSend(true);
+  };
+  el.addEventListener("pointerdown", (e) => {
+    if (running) return;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add("held");
+    follow.x0 = e.clientX; follow.y0 = e.clientY; follow.dx = follow.dy = 0;
+    follow.m0 = machMm && machMm.slice();
+    followShow();
+    followSend(false);
+    follow.timer = setInterval(() => followSend(false), 50);
+  });
+  el.addEventListener("pointermove", (e) => { if (el.classList.contains("held")) at(e); });
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointercancel", up);
+})();
+
 function zero(...axes) {
   mdi("G10 L20 P0 " + axes.map((a) => a + "0").join(" "));
 }
@@ -189,6 +251,7 @@ document.addEventListener("click", (e) => {
   if (!b) return;
   for (const x of b.parentElement.children) x.classList.toggle("on", x === b);
   step = parseFloat(b.dataset.step);
+  $("followspan").textContent = "±" + 10 * step + " mm";
 });
 function applyOverrides(ov) {
   for (const g of ["feed", "rapid", "spindle", "toggles"]) {

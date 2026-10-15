@@ -87,6 +87,19 @@ button:disabled{ opacity:.4; cursor:not-allowed; }
               border-radius:50%; background:var(--accent2); border:2px solid var(--accent);
               pointer-events:none; }
 .stick.held{ border-color:var(--accent); cursor:grabbing; }
+/* follow pad: the pointer (dot) and where the machine is (ring), both
+   relative to where the drag began */
+.follow{ position:relative; width:9.5rem; height:9.5rem; border-radius:var(--r); touch-action:none;
+         background:var(--panel); border:1px solid var(--line); cursor:crosshair; user-select:none;
+         background-image:linear-gradient(var(--line),var(--line)),linear-gradient(var(--line),var(--line));
+         background-size:1px 100%,100% 1px; background-position:center; background-repeat:no-repeat; }
+.follow.held{ border-color:var(--accent); }
+.follow .dot,.follow .mach{ position:absolute; left:50%; top:50%; border-radius:50%; pointer-events:none; }
+.follow .dot{ width:.9rem; height:.9rem; margin:-.45rem; background:var(--accent); display:none; }
+.follow .mach{ width:1.5rem; height:1.5rem; margin:-.75rem; border:2px solid var(--accent2); display:none; }
+.follow.held .dot,.follow.held .mach{ display:block; }
+.follow .span{ position:absolute; right:.35rem; bottom:.2rem; font-size:.68rem; color:var(--mut);
+               pointer-events:none; }
 .sticknote{ color:var(--mut); font-size:.75rem; max-width:16rem; line-height:1.4; }
 /* horizontal segmented (settings) and vertical segmented (jog step) */
 .seg{ display:flex; gap:.3rem; flex-wrap:wrap; }

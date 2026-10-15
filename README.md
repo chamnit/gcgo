@@ -118,9 +118,10 @@ into a desktop loop or an MCU loop unchanged.
 ### Jogging
 
 Continuous jogging uses caPy's jog mode (bare `$J`, then `U`/`V`/`S`/`T`
-lines; see caPy's `doc/jog/README.md`). `gcgo/core/jog.py`'s `JogSession` is
-the only code that talks to it; input devices never write to the wire. An
-input module reads its device and calls one of:
+lines; see caPy's `doc/jog/README.md`), or short `$J=` lines on GRBL (below).
+`gcgo/core/jog.py`'s `JogSession` is the only code that talks to the
+controller; input devices never write to the wire. An input module reads its
+device and calls one of:
 
 ```python
 jog.vel("gamepad", vx, vy, vz)    # mm/s, every time the device is read
@@ -139,11 +140,51 @@ handwheel on Z run together. Each input owns the axes it pushes, and an input
 or moving target that stops refreshing is zeroed after its TTL. On a caPy
 without `U` (before 907d191) it falls back to `V`, and steps and targets wait
 until no velocity is live.
+
+**On GRBL**, which has no jog mode, the bare `$J` is answered `error:3` and the
+session switches itself to short `$J=` lines; the inputs don't change:
+
+- a velocity goes out as `$J=G91` blocks of 50 ms of motion each, with at most
+  200 ms queued, so GRBL can only reach the speed it can stop within that queue
+  (roughly 0.4 × acceleration, in mm/s)
+- letting go, an axis reversing, or an input that goes quiet sends `0x85`, which
+  brakes and flushes GRBL's planner
+- steps are `$J=G91` lines, and targets (moving ones included) are `$J=G53`
+  go-tos to the newest position, paced like a velocity
+- GRBL accepts and then discards a `$J=` that arrives while a cancel is braking,
+  so after a `0x85` nothing goes out until fresh status reports show it out of
+  Jog; a line still unanswered when the `0x85` went out gets a second `0x85`
+  once it is answered
+- `R` (rate) scales speeds in gcgo, and `C` (coordinated) doesn't apply
+
+**Following.** `gcgo/core/follow.py`'s `Follower` makes the machine follow a
+point that an input moves:
+
+```python
+f = Follower(jog)                  # axes="XY" by default
+f.start(status.mpos)               # take hold: offsets are from here
+f.move(dx, dy, feed=1000)          # every reading; it is also the heartbeat
+f.end(feed=1000)                   # let go: a last go-to to the final point
+```
+
+It estimates the point's velocity from the readings (smoothed over 50 ms, on
+the input's own clock when the reading carries one) and sends moving targets,
+so caPy extrapolates between readings instead of chasing the last one. A point
+at rest becomes a single go-to; a follower that stops reading is braked by the
+moving target's TTL.
+
 `gcgo/core/jogmap.py` holds the shared feel: `stick_to_velocity` (radial
 deadband, square-law magnitude, direction kept) and a shuttle-ring table. The
-web UI's virtual stick is the first input. It enters jog mode on the first
-drag, and the server leaves jog mode after 3 s at rest or when MDI or a run
-needs the machine.
+web UI has two jog inputs:
+
+- **Virtual sticks** (X/Y and Z): speed grows with the drag, up to FEED; let go
+  to stop.
+- **Follow pad**: press and drag, and the machine follows the pointer in X/Y
+  (a `Follower`), up to FEED, and stops where you let go. The pad edge is
+  10 × STEP mm from where the drag began, and a ring shows where the machine is.
+
+The first drag enters jog mode, and the server leaves jog mode after 3 s at
+rest or when MDI or a run needs the machine. Both work on caPy and GRBL.
 
 **Gamepad** (Linux, desktop web server): `python -m gcgo.desktop.webmain
 <port> --gamepad [DEV] [--gamepad-feed 3000]`. The bindings are in
@@ -190,7 +231,8 @@ python3 -m pytest
 ```
 
 The tests run the real `Streamer` over a fake serial port, with a clock the
-tests advance by hand, so they need no hardware and don't sleep. The Linux
+tests advance by hand, so they need no hardware and don't sleep. The jog tests
+cover both caPy's jog mode and the GRBL fallback. The Linux
 gamepad reader tests use a virtual pad through `/dev/uinput` and skip
 themselves where that isn't writable.
 

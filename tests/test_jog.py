@@ -283,3 +283,18 @@ def test_capy_braking_a_held_stick_resends_at_once(port, streamer, clock):
     j.tick()
     assert port.lines() == ["U X6", "U X6"]      # not waiting for the next resend
     assert "braked" in events[-1] and shown      # the controller's words still shown
+
+
+def test_a_moving_target_drops_a_waiting_go_to(port, streamer, clock):
+    j = on_session(port, streamer, clock)
+    j.vel("s", 3, 0, 0, ttl_ms=0)
+    j.target(x=1)                                # waits for the stick on X
+    j.target(x=2, vx=4)                          # newer, on the same axis
+    j.release("s")
+    j.tick()
+    answer(port, streamer, *["ok"] * j.inflight)
+    clock.advance(401)                           # the moving target dies
+    j.tick()
+    answer(port, streamer, *["ok"] * j.inflight)
+    j.tick()
+    assert not any(l.startswith("T X1") for l in port.lines())

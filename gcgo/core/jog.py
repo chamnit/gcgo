@@ -37,6 +37,25 @@ here, so the session's resends can never keep a dead input's motion alive.
 A caPy without U answers it error:16; the session then falls back to V (a
 complete state) and holds every step and target while any velocity is live.
 
+GRBL has no jog mode: it answers the bare `$J` error:3, and the session then
+drives the same inputs with short `$J=` lines (Grbl wiki, "Jogging"):
+
+    velocity   $J=G91 G21 X.. Y.. F..   one GRBL_BLOCK_MS of motion per line,
+               sent while less than GRBL_LEAD_MS is queued ahead of the clock
+    stop       0x85: GRBL brakes and flushes its planner -- on release, on an
+               axis reversing, on a dead input or moving target
+    step       $J=G91 G21 X<mm> F..
+    target     $J=G53 G90 G21 X.. F..   a moving target is resent as a go-to
+               to its newest position, paced like a velocity
+
+GRBL plans (and answers ok for) a $J= that arrives while a cancel is braking,
+then flushes it, so after a 0x85 nothing goes out until fresh status reports
+show it out of Jog; and a line still waiting for its ok when the 0x85 went out
+may be parsed after the brake, so the 0x85 is sent again once it is answered.
+The queued lead bounds the speed GRBL can reach (it must be able to stop
+inside it): v <= about 2 * accel * GRBL_LEAD_MS. C (coordinated) does not
+apply (a $J= line is always straight) and R scales the velocities here.
+
 Driven from the caller's loop like Streamer.pump(): call tick() every pass.
 No threads, no blocking, MicroPython-safe.
 """
@@ -58,6 +77,12 @@ KEEPALIVE_MIN_MS = 15
 SOURCE_TTL_MS = 400    # a velocity input or moving target not refreshed this long is zeroed
 RETRY_MS = 500         # after a refused $J (still braking, alarm), wait this long
 SETTINGS_QUERY = "$settings.jog"
+
+GRBL_BLOCK_MS = 50     # GRBL: motion per velocity line
+GRBL_LEAD_MS = 200     # GRBL: queue at most this much motion ahead
+GRBL_POLL_MS = 30      # GRBL: status poll while waiting for a cancel to finish
+GRBL_HALT_MS = 2000    # GRBL: give up waiting for that after this long
+GRBL_FEED = 1000       # GRBL: mm/min for a step or target that names no F
 
 
 def _num(v):
@@ -99,6 +124,18 @@ class JogSession:
         self._retry_at = 0            # no new $J before this (after a refusal)
         self._ka = None               # $jog.keepalive / $jog.cover as read on entry
         self._cover = 0.0
+        self.grbl = False             # GRBL: no jog mode, short $J= lines
+        self.feed = GRBL_FEED         # GRBL: F for a step or target without one
+        self._rate = 1.0              # GRBL: the R knob, applied here
+        self._gv = [0.0, 0.0, 0.0]    # GRBL: the velocity queued
+        self._until = 0               # GRBL: queued motion runs until about then
+        self._gend = None             # GRBL: where the last G53 line ends (None: unknown)
+        self._halt = False            # GRBL: a 0x85 is braking
+        self._halt_seq = 0            # GRBL: status count when it went out
+        self._halt_at = 0
+        self._poll_at = 0
+        self._recancel = 0            # GRBL: lines unanswered when the 0x85 went out
+        self._err, self._err_at = "", 0   # the last refusal reported
         streamer.jog = self           # Streamer routes our replies here
 
     # --- lifecycle ---
@@ -116,6 +153,10 @@ class JogSession:
         through tick()/reply() (on_event reports a refusal)."""
         if self.state != OFF or diff_ms(now_ms(), self._retry_at) < 0:
             return
+        if self.grbl:                  # nothing to enter
+            self.state = ON
+            self._until = now_ms()
+            return
         self.state = ENTERING
         self._write("$J")
 
@@ -124,7 +165,10 @@ class JogSession:
         sent is dropped; replies to lines already sent are still counted."""
         if self.state == OFF:
             return
-        self.s._send_realtime(b"\x85")
+        if self.grbl:
+            self._cancel()
+        else:
+            self.s._send_realtime(b"\x85")
         self.state = OFF
         self._clear()
 
@@ -144,6 +188,9 @@ class JogSession:
         self._moving = None
         self._stop = 0
         self._knobs = []
+        self._gv = [0.0, 0.0, 0.0]
+        self._gend = None
+        self._halt = False
 
     # --- what inputs call ---
 
@@ -195,22 +242,30 @@ class JogSession:
                 self._stop |= self._moving[0] & ~mask   # axes it no longer drives
             self._moving = [mask, pos, vel, feed, now_ms(), ttl_ms]
             self._moving_new = True
+            if self._target and self._target[0] & mask:
+                self._target = None                 # newest wins: no stale go-to after it
         else:
             if self._moving and self._moving[0] & mask:
                 self._moving = None                 # a plain go-to takes over
             self._target = (mask, pos, feed)
 
     def coordinated(self, on: bool) -> None:
-        self._knobs.append("C1" if on else "C0")
+        if not self.grbl:
+            self._knobs.append("C1" if on else "C0")
 
     def rate(self, frac: float) -> None:
-        self._knobs.append("R" + _num(max(0.0, frac)))
+        self._rate = max(0.0, frac)
+        if not self.grbl:
+            self._knobs.append("R" + _num(self._rate))
 
     # --- the loop ---
 
     def tick(self) -> None:
         """Send what is due. Call every pass of the driver loop."""
         if self.state != ON:
+            return
+        if self.grbl:
+            self._tick_grbl()
             return
         # caPy reports Jog for the whole mode, at rest too. Two fresh reports
         # in another state mean it ended without us (an alarm, a reset).
@@ -268,8 +323,21 @@ class JogSession:
         """An ok/error for one of our lines (routed by Streamer)."""
         verb = self._fifo.pop(0) if self._fifo else ""
         err = line.startswith("error")
+        if verb == "J" and self._recancel:
+            # parsed after the 0x85 went out, it may have started a move
+            self._recancel -= 1
+            if not self._recancel:
+                self.s._send_realtime(b"\x85")
+                self._halt_seq = self.s._status_seq
         if verb == "$J":
             if self.state != ENTERING:
+                return
+            if line.startswith("error:3"):     # GRBL: "$J" is not a command
+                self.grbl = True
+                self.state = ON
+                self._knobs = []
+                self._until = now_ms()
+                self._event("GRBL has no jog mode: jogging with short $J= lines")
                 return
             self.state = OFF if err else ON
             self._on_seq = self.s._status_seq
@@ -290,7 +358,12 @@ class JogSession:
             self._sent = [0.0, 0.0, 0.0]       # resend the velocity as V
             self._event("caPy has no U (masked jog): using V, steps wait for the stick")
         elif err:
-            self._event("jog line refused: " + line)
+            # a held input repeats a refused line (a soft limit) every pass:
+            # say it once a second
+            now = now_ms()
+            if line != self._err or diff_ms(now, self._err_at) >= 1000:
+                self._err, self._err_at = line, now
+                self._event("jog line refused: " + line)
 
     def note(self, line: str) -> bool:
         """A non-ok line from the controller while in jog mode (routed by
@@ -341,7 +414,10 @@ class JogSession:
 
     def _write(self, line):
         self.s._send_raw(line)
-        self._fifo.append(line if line[:1] == "$" else line[:1])
+        if line.startswith("$J="):
+            self._fifo.append("J")
+        else:
+            self._fifo.append(line if line[:1] == "$" else line[:1])
 
     def _event(self, text):
         if self.on_event:
@@ -367,6 +443,111 @@ class JogSession:
                     if s[i] != 0.0:
                         self._owner[i] = n
                         break
+
+    # --- GRBL: short $J= lines ---
+
+    def _tick_grbl(self):
+        now = now_ms()
+        self._expire(now)
+        if self._halt and not self._halt_done(now):
+            return
+        r = self._rate
+        v = self.velocity()
+        v = (v[0] * r, v[1] * r, v[2] * r)
+        live = v != (0.0, 0.0, 0.0)
+        g = self._gv
+        if self._stop or (g != [0.0, 0.0, 0.0] and (
+                not live or g[0] * v[0] < 0 or g[1] * v[1] < 0 or g[2] * v[2] < 0)):
+            self._stop = 0                     # released, reversed, or a dead input
+            self._halt_start(now)
+            return
+        if diff_ms(self._until, now) < 0:
+            self._until = now
+        while self.inflight < MAX_INFLIGHT:
+            room = diff_ms(self._until, now) < GRBL_LEAD_MS
+            busy = live or self._moving is not None
+            if live:
+                if not room:
+                    break
+                self._grbl_velocity(v)
+            elif self._moving and self._moving_new:
+                if not room:
+                    break
+                mask, pos, vel, feed = self._moving[:4]
+                self._moving_new = False
+                self._grbl_goto(mask, pos, feed)
+            elif self._target is not None and not live:
+                mask, pos, feed = self._target
+                self._target = None
+                self._grbl_goto(mask, pos, feed)
+            else:
+                i = self._next_step(7 if busy else 0)
+                if i < 0:
+                    break
+                mm, feed = self._steps[i], self._step_feed[i] or self.feed
+                self._steps[i] = 0.0
+                self._gend = None
+                self._write("$J=G91 G21 " + AXES[i] + _num(mm) + " F" + _num(feed))
+                self._until += int(abs(mm) / feed * 60000)
+
+    def _grbl_velocity(self, v):
+        dt = GRBL_BLOCK_MS / 1000.0
+        words = [AXES[i] + _num(v[i] * dt) for i in range(3) if v[i] != 0.0]
+        words = [w for w in words if w[1:] != "0"]
+        self._until += GRBL_BLOCK_MS
+        self._gv = [v[0], v[1], v[2]]
+        if words:                              # (a crawl below 0.01 mm/s rounds away)
+            speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) ** 0.5
+            self._gend = None
+            self._write("$J=G91 G21 " + " ".join(words) + " F" + _num(speed * 60))
+
+    def _grbl_goto(self, mask, pos, feed):
+        feed = feed or self.feed
+        start = self._gend or self.s.status.mpos
+        d2 = 0.0
+        for i in range(3):
+            if mask & (1 << i):
+                d2 += (pos[i] - start[i]) ** 2
+        words = " ".join(AXES[i] + _num(pos[i]) for i in range(3) if mask & (1 << i))
+        self._write("$J=G53 G90 G21 " + words + " F" + _num(feed))
+        end = list(start)
+        for i in range(3):
+            if mask & (1 << i):
+                end[i] = pos[i]
+        self._gend = end
+        self._until += int(d2 ** 0.5 / feed * 60000)
+
+    def _cancel(self):
+        """0x85, and again once every line still unanswered has been parsed."""
+        self.s._send_realtime(b"\x85")
+        self._recancel = self.inflight
+        self._gv = [0.0, 0.0, 0.0]
+        self._gend = None
+
+    def _halt_start(self, now):
+        self._cancel()
+        self._halt = True
+        self._halt_seq = self.s._status_seq
+        self._halt_at = now
+        self.s.request_status()
+        self._poll_at = now + GRBL_POLL_MS
+
+    def _halt_done(self, now):
+        # two fresh reports out of Jog, and nothing unanswered that could move
+        st = self.s.status.state
+        if (not self._recancel and self.s._status_seq >= self._halt_seq + 2
+                and not st.startswith("Jog")):
+            self._halt = False
+        elif diff_ms(now, self._halt_at) >= GRBL_HALT_MS:
+            self._halt = False
+            self._event("GRBL jog cancel: no status out of Jog, going on")
+        elif diff_ms(now, self._poll_at) >= 0:
+            self.s.request_status()
+            self._poll_at = now + GRBL_POLL_MS
+        if self._halt:
+            return False
+        self._until = now
+        return True
 
     def _next_step(self, busy):
         for i in range(3):

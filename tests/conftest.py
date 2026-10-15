@@ -3,6 +3,7 @@ the tests move by hand (jog timing without sleeping)."""
 
 import pytest
 
+from gcgo.core import follow as followmod
 from gcgo.core import jog as jogmod
 from gcgo.core.protocol import Streamer
 
@@ -66,6 +67,7 @@ class Clock:
 def clock(monkeypatch):
     c = Clock()
     monkeypatch.setattr(jogmod, "now_ms", c)
+    monkeypatch.setattr(followmod, "now_ms", c)
     return c
 
 

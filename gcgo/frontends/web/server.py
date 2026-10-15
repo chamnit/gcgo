@@ -15,6 +15,7 @@ except ImportError:                      # MicroPython <1.20
 from gcgo.core.clock import diff_ms, now_ms
 from gcgo.core.config import REPORT_MM
 from gcgo.core.gcode import validate_gcode
+from gcgo.core.follow import Follower
 from gcgo.core.jog import JogSession
 from gcgo.core.jogmap import stick_to_velocity
 from gcgo.core.protocol import FINISHING, RUNNING
@@ -112,6 +113,7 @@ class WebServer:
         self.jog = JogSession(streamer, on_event=lambda t: self.broadcast(
             {"type": "msg", "line": t}))
         self._jog_rest_at = 0  # when the jog last had motion (for the idle end)
+        self.follow = Follower(self.jog)   # the follow pad (X/Y)
         # jog inputs on this host (a gamepad...): each has poll(jog), called
         # every driver pass; their messages go to the console
         self.inputs = list(inputs)
@@ -189,10 +191,14 @@ class WebServer:
                     getattr(self.s, m)()
         elif c == "reset":
             self.jog.lost()         # a reset ends jog mode on the controller
+            self.follow.active = False
             self.s.request_reset()
         elif c == "jog_vel":
             self._jog_vel(cmd)
+        elif c == "jog_follow":
+            self._jog_follow(cmd)
         elif c == "jog_end":
+            self.follow.active = False
             self.jog.end()
         elif c == "mdi":
             if self._jog_blocks():
@@ -260,11 +266,38 @@ class WebServer:
         self.jog.vel("web", *v)
         self.jog.tick()                 # out now, not on the next driver pass
 
+    def _jog_follow(self, cmd):
+        """A follow-pad frame: dx/dy, the pointer's offset (mm) from where it
+        took hold; f, the speed cap (mm/min); t, the browser's clock (ms);
+        end, let go. The machine follows the pointer as a moving target and
+        stops on the point where it was let go."""
+        if self.s.active:
+            return
+        try:
+            dx, dy = float(cmd.get("dx") or 0), float(cmd.get("dy") or 0)
+            f = float(cmd.get("f") or 1000)
+            t = cmd.get("t")
+            t = None if t is None else float(t)
+        except (TypeError, ValueError):
+            return
+        if cmd.get("end"):
+            if self.follow.active:
+                self.follow.move(dx, dy, feed=f, t_ms=t)
+                self.follow.end(feed=f)
+                self.jog.tick()
+            return
+        if not self.follow.active:
+            self.follow.start(self.s.status.mpos)   # offsets are from here
+        self.jog.begin()                # no-op once on
+        self.follow.move(dx, dy, feed=f, t_ms=t)
+        self.jog.tick()                 # out now, not on the next driver pass
+
     def _jog_blocks(self):
         """caPy refuses g-code in jog mode: end the session first, and drop
         this command (the controller needs a moment to brake and re-seed)."""
         if not self.jog.active:
             return False
+        self.follow.active = False
         self.jog.end()
         self.broadcast({"type": "msg", "line": "jog mode ended — send that again"})
         return True
@@ -372,7 +405,11 @@ class WebServer:
     def _jog_idle_end(self):
         """Leave jog mode after JOG_IDLE_MS with no motion asked for, so the
         machine goes back to Idle and takes g-code again."""
+        if self.follow.active and not self.follow.alive():
+            self.follow.active = False   # a pad gone quiet (a closed tab): its
+                                         # target's TTL has braked it; no go-to
         if (not self.jog.active or self.jog.velocity() != (0.0, 0.0, 0.0)
+                or self.follow.active
                 or self.s.status.feed):   # a step or target still moving
             self._jog_rest_at = now_ms()
         elif diff_ms(now_ms(), self._jog_rest_at) >= JOG_IDLE_MS:
