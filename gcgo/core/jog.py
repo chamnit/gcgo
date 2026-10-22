@@ -15,9 +15,10 @@ caPy's jog mode (bare `$J`, from Idle) takes text commands, each answered
 axis needs a line naming it (V, U, or T with its velocity word) within
 $jog.keepalive (default 250 ms, fixed while in jog mode), or caPy brakes
 everything and sends [MSG:Jog stopped -- no V line within jog.keepalive].
-The planner runs $jog.cover ahead of the motors, so that stop can come up to
-the cover early. The session reads both settings on entry and resends every
-moving axis well inside the window.
+While the jog runs, the stop is never early; only the first line from rest
+gets a window shorter by up to $jog.cover (the planner runs that far ahead
+of the motors). The session reads both settings on entry and resends every
+moving axis within keepalive - cover.
 
 Input devices never write to the wire. They hand this session what the
 operator wants -- a velocity vector, a step, a target -- and the session turns

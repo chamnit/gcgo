@@ -272,10 +272,20 @@ sharing the same core. Verified on a Raspberry Pi Pico W with GRBL on UART0
 (GP16/17) and a hardware reset line on GP18, through level shifters:
 
 ```
-mpremote connect /dev/ttyACM0 cp -r gcgo :
+pip install mpy-cross==<the board's MicroPython version>
+python3 tools/build_mpy.py                     # precompiled tree in build/mpy/gcgo
+mpremote connect /dev/ttyACM0 cp -r build/mpy/gcgo :
 # put WIFI_SSID / WIFI_PASS in a secrets.py on the board, then:
 mpremote connect /dev/ttyACM0 exec "from gcgo.micropython.webmain import start; start()"
 ```
+
+Copy the precompiled tree, not the source: a board compiles `.py` in RAM at
+import, and the web server then needs a heap of about 180 KB, against about
+110 KB from `.mpy` (measured on MicroPython's unix port, so with 64-bit
+objects). A Pico W with WiFi up has roughly 160-170 KB. Clear an old `gcgo/`
+off the board first, since a leftover `.py` beside its `.mpy` is what gets
+imported. Settings reads and page files go out in small pieces, so neither
+needs a large block of the heap.
 
 It prints the board's IP; open `http://<board-ip>/`. The desktop build serves
 the identical UI via `python -m gcgo.desktop.webmain <port>`.

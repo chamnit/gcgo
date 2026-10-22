@@ -60,6 +60,7 @@ document.addEventListener("click", (e) => {
 // GRBL's $$); what each one means -- kind, range, default, text -- comes from
 // settings.json, generated from caPy's settings table by tools/sync_capy.py.
 let schema = null, ctl = null, codes = { errors: {} };
+let incoming = [];                       // rows of a read in progress (ctl_rows)
 const loadSchema = fetch("/settings.json").then((r) => r.json())
   .then((j) => { schema = j; }).catch(() => { schema = { capy: [], grbl: {} }; });
 fetch("/codes.json").then((r) => r.json()).then((j) => { codes = j; }).catch(() => {});
@@ -67,6 +68,7 @@ fetch("/codes.json").then((r) => r.json()).then((j) => { codes = j; }).catch(() 
 function ctlLoad() {
   $("ctlload").disabled = true;
   $("ctlrows").textContent = "reading…";
+  incoming = [];
   send({ cmd: "ctl_settings" });
 }
 
@@ -167,14 +169,18 @@ function explainErr(r) {
 }
 
 function ctlHandle(m) {
-  if (m.type === "ctl_settings") {
+  if (m.type === "ctl_rows") {
+    incoming.push(...m.rows);
+    $("ctlrows").textContent = "reading… " + incoming.length;
+  } else if (m.type === "ctl_settings") {
     $("ctlload").disabled = false;
+    const rows = incoming;
+    incoming = [];
     if (m.error) { $("ctlrows").textContent = explainErr(m.error); return; }
     loadSchema.then(() => {
       const open = ctl ? ctl.open : new Set();
-      ctl = { fw: m.fw, rows: m.rows, state: {}, open };
-      $("ctlfw").textContent = m.fw === "capy" ? "caPy · " + m.rows.length + " settings"
-                                               : "GRBL · " + m.rows.length + " settings";
+      ctl = { fw: m.fw, rows, state: {}, open };
+      $("ctlfw").textContent = (m.fw === "capy" ? "caPy · " : "GRBL · ") + rows.length + " settings";
       $("ctlsave").style.display = m.fw === "capy" ? "" : "none";
       ctlRender();
     });

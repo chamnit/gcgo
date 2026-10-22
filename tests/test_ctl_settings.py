@@ -32,8 +32,10 @@ def test_capy_settings_are_read_into_rows(server, port, streamer):
            "$motor.1.steps=80              ; * steps/mm",
            "; x: linear, motor 1",
            "ok")
-    assert sent(server) == [{"type": "ctl_settings", "fw": "capy", "rows": [
-        ["kin.type", "cartesian", "kin"], ["motor.1.steps", "80", "motor"]]}]
+    assert sent(server) == [
+        {"type": "ctl_rows", "rows": [["kin.type", "cartesian", "kin"],
+                                      ["motor.1.steps", "80", "motor"]]},
+        {"type": "ctl_settings", "fw": "capy", "n": 2}]
     assert not any(o.get("line", "").startswith(("$", ";")) for o in server.pending)
 
 
@@ -42,8 +44,19 @@ def test_grbl_falls_back_to_dollar_dollar(server, port, streamer):
     answer(port, streamer, "error:3")
     assert port.lines()[-1] == "$$"
     answer(port, streamer, "$0=10", "$110=500.000", "ok")
-    assert sent(server)[-1] == {"type": "ctl_settings", "fw": "grbl",
-                                "rows": [["0", "10", ""], ["110", "500.000", ""]]}
+    assert sent(server)[-2:] == [{"type": "ctl_rows", "rows": [["0", "10", ""], ["110", "500.000", ""]]},
+                                 {"type": "ctl_settings", "fw": "grbl", "n": 2}]
+
+
+def test_rows_go_out_in_chunks(server, port, streamer):
+    server.apply({"cmd": "ctl_settings"})
+    answer(port, streamer, *["$s.%d=%d" % (i, i) for i in range(srv.CTL_CHUNK * 2 + 3)])
+    chunks = [o for o in sent(server) if o["type"] == "ctl_rows"]
+    assert [len(c["rows"]) for c in chunks] == [srv.CTL_CHUNK, srv.CTL_CHUNK]
+    assert len(server._ctl[0]) == 3              # held: fewer than a chunk
+    answer(port, streamer, "ok")
+    assert [len(o.get("rows", ())) for o in sent(server)][-2:] == [3, 0]
+    assert sent(server)[-1]["n"] == srv.CTL_CHUNK * 2 + 3
 
 
 def test_a_refused_read_says_why(server, port, streamer):
