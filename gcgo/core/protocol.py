@@ -29,6 +29,8 @@ DONE = "done"
 ERROR = "error"
 STOPPED = "stopped"
 
+LINK_LOST = "error: serial link lost"   # the reply owed lines get when it drops
+
 # GRBL run-states in which the machine is still moving (or paused mid-motion),
 # so buffered motion from a finished stream hasn't fully drained yet. Anything
 # else (Idle, Alarm, Check, Sleep) is settled — nothing left to execute.
@@ -61,6 +63,7 @@ class Streamer:
         # reply still on its way when a jog starts is not taken as the jog's.
         self.jog = None
         self._owed = []
+        self._link = True             # False once a dropped link has been handled
         self._reset_stream()
 
     def _reset_stream(self) -> None:
@@ -136,6 +139,43 @@ class Streamer:
     @property
     def connected(self) -> bool:
         return self._io.is_open()
+
+    def check_link(self) -> bool:
+        """True while the link is up. The first call that finds it gone (a
+        transport that closed itself: a pulled cable, a power-cycled
+        controller) ends a running stream with ERROR, drops what was read,
+        answers every function still owed a reply with LINK_LOST and forgets
+        the jog session. pump() and service() call it."""
+        if self._io.is_open():
+            return True
+        if self._link:
+            self._link = False
+            self._rx = bytearray()
+            self._rx_pos = 0
+            if self.active:
+                self._state = ERROR
+                self._close_file()
+            owed, self._owed = self._owed, []
+            for owner in owed:
+                if callable(owner):
+                    owner(LINK_LOST)
+            if self.jog is not None:
+                self.jog.lost()
+        return False
+
+    def reconnect(self) -> bool:
+        """After the link dropped: reopen the port if the transport can.
+        True once it is open again (the controller's own setup is the
+        caller's: a GRBL on USB is rebooting and greets in a moment)."""
+        if not self._io.is_open():
+            reopen = getattr(self._io, "reopen", None)
+            if reopen is None or not reopen():
+                return False
+        self._io.set_timeout(self._timeout)
+        self.flush_input()
+        self.status.state = ""         # nothing known until it reports
+        self._link = True
+        return True
 
     # --- line assembly ---
 
@@ -422,6 +462,8 @@ class Streamer:
         """
         if self._state != RUNNING and self._state != FINISHING:
             return self._state
+        if not self.check_link():
+            return self._state                       # ERROR: the link dropped
 
         if self._state == RUNNING:
             # 1) fill GRBL's RX buffer from the file
@@ -540,7 +582,8 @@ class Streamer:
     def service(self) -> None:
         """Non-blocking: read and route any pending GRBL output. Use when idle
         (pump() does this while streaming)."""
-        self._read_and_route(False)
+        if self.check_link():
+            self._read_and_route(False)
 
     def request_status(self) -> None:
         """Non-blocking status request ('?'); reply arrives via service()."""

@@ -81,6 +81,20 @@ def _show_unsolicited(streamer: Streamer) -> None:
             print(_grbl(l))
 
 
+def _check_link(streamer: Streamer) -> None:
+    """Before a command: if the serial link dropped (a pulled cable, a
+    power-cycled controller), say so and try the port again."""
+    if streamer.check_link():
+        return
+    print("  serial link lost — trying the port again")
+    if not streamer.reconnect():
+        print("  still down; commands that need the controller get no answer")
+        return
+    greeting = streamer.connect()      # (waits out a GRBL rebooting on open)
+    print("  serial link back" + (": " + _grbl(greeting).strip() if greeting else ""))
+    _report_mm(streamer)
+
+
 def _format_status_line(st: GRBLStatus, progress: str, cfg: StatusConfig) -> str:
     """Compact single-line status for the streaming display.
 
@@ -432,7 +446,10 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
     name = os.path.basename(path)
     if err is not None:
         print_above(f"  stream error: {err}", "")
-    if state == "error":
+    lost = not streamer.connected
+    if lost:
+        msg = f"Stream stopped, serial link lost: {name} ({sent}/{total} lines sent)"
+    elif state == "error":
         msg = f"Stream halted on error: {name} ({sent}/{total} lines sent)"
     elif state == "stopped":
         msg = f"Stream stopped: {name} ({sent}/{total} lines sent)"
@@ -446,7 +463,7 @@ def _run_stream(streamer: Streamer, path: str, cfg: StatusConfig) -> bool:
     # only if we actually sent something; otherwise there's nothing to halt and
     # a needless soft-reset would wipe overrides / alarm a homing machine.
     completed = state == "done"
-    if not completed and streamer.sent_any:
+    if not completed and streamer.sent_any and not lost:
         greeting = streamer.cancel()
         sys.stdout.write("Machine reset to halt motion and flush buffers.\n")
         if greeting:
@@ -673,6 +690,7 @@ def _repl(streamer: Streamer, cfg: StatusConfig) -> None:
             print()
             break
 
+        _check_link(streamer)
         _show_unsolicited(streamer)
         if not raw:
             continue
@@ -760,8 +778,10 @@ def _repl(streamer: Streamer, cfg: StatusConfig) -> None:
                     print(_grbl(greeting))
 
             elif cmd == "status":
-                grbl_status.update(streamer.query_status())
-                _print_status_detail(grbl_status, cfg)
+                reply = streamer.query_status()
+                if streamer.connected:          # (not the last status known)
+                    grbl_status.update(reply)
+                    _print_status_detail(grbl_status, cfg)
 
             else:
                 print(f"Unknown command: {cmd!r}. Type 'help' for available commands or 'mdi' to send gcode directly.")
@@ -774,3 +794,5 @@ def _repl(streamer: Streamer, cfg: StatusConfig) -> None:
             streamer.flush_input()
         except Exception as e:
             print(f"Error: {e}")
+        if not streamer.connected:      # it dropped during the command
+            _check_link(streamer)

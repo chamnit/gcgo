@@ -80,6 +80,13 @@ by default:
 motion and flush GRBL's buffers — stopping only the stream would leave GRBL
 running its already-buffered moves.
 
+If the serial link drops (a USB cable pulled, the controller power-cycled),
+a running stream stops and says so; the next command at the prompt tries the
+port again. `gcgo-web` shows the machine as **NoLink**, stops the job and any
+jog, refuses commands that need the controller, and reopens the port every
+second; once it is back it sets reports to mm again (after 2 s, so a GRBL on
+USB has rebooted). Nothing restarts the job on its own.
+
 ### Configuration
 
 `config` manages everything, persisted to `~/.config/gcgo/config.json`
@@ -280,8 +287,8 @@ mpremote connect /dev/ttyACM0 exec "from gcgo.micropython.webmain import start; 
 ```
 
 Copy the precompiled tree, not the source: a board compiles `.py` in RAM at
-import, and the web server then needs a heap of about 180 KB, against about
-110 KB from `.mpy` (measured on MicroPython's unix port, so with 64-bit
+import, and the web server then needs a heap of about 190 KB, against about
+115 KB from `.mpy` (measured on MicroPython's unix port, so with 64-bit
 objects). A Pico W with WiFi up has roughly 160-170 KB. Clear an old `gcgo/`
 off the board first, since a leftover `.py` beside its `.mpy` is what gets
 imported. Settings reads and page files go out in small pieces, so neither

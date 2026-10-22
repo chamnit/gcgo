@@ -13,7 +13,7 @@ function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
 function setState(s) {
   const el = $("state");
-  el.textContent = s;
+  el.textContent = s === "NoLink" ? "no link" : s;   // the serial link is down
   el.className = "badge " + (s || "").split(":")[0];
 }
 const join = (d, n) => (d ? d + "/" + n : n);

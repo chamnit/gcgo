@@ -18,7 +18,7 @@ from gcgo.core.gcode import validate_gcode
 from gcgo.core.follow import Follower
 from gcgo.core.jog import JogSession
 from gcgo.core.jogmap import stick_to_velocity
-from gcgo.core.protocol import FINISHING, RUNNING
+from gcgo.core.protocol import FINISHING, LINK_LOST, RUNNING
 from gcgo.core.tables import ACTION_METHOD
 from gcgo.frontends.web import ws as wsproto
 
@@ -26,7 +26,15 @@ _CT = {"html": "text/html", "js": "application/javascript", "css": "text/css",
        "json": "application/json"}
 CTL_CHUNK = 16       # controller-settings rows per message to the browser
 JOG_IDLE_MS = 3000   # leave jog mode after this long with nothing moving
+LINK_RETRY_MS = 1000 # a dropped serial link: try the port again this often
+LINK_SETUP_MS = 2000 # ...and once back, set it up after this (a GRBL on USB reboots)
+NO_LINK = "NoLink"   # the state shown while the serial link is down
+_WRITES = ("rt", "reset", "jog_vel", "jog_follow", "jog_end", "mdi", "run", "ctl_save")
 _GCODE_EXT = (".gcode", ".nc", ".g", ".gc", ".ngc")
+
+
+def _quiet(reply):
+    pass
 
 
 def _safe_rel(rel):
@@ -123,7 +131,11 @@ class WebServer:
             if getattr(inp, "on_event", False) is None:
                 inp.on_event = lambda t: self.broadcast({"type": "msg", "line": t})
         self.s.gc_collect = True
-        self.s.write_line(REPORT_MM)
+        self._setup()
+        self._up = True        # the serial link, as last seen
+        self._retry_at = 0     # down: when to try the port again
+        self._setup_at = None  # back up: when to send the setup lines
+        self._poll_at = 0      # the next status poll (idle)
 
     def _on_response(self, i, r):
         # while the job owns the machine, only surface errors (avoid one msg per
@@ -147,7 +159,7 @@ class WebServer:
         st = self.s.status
         k = self.cfg.scale   # reports are mm; convert to the display units
         return {
-            "type": "status", "state": st.state,
+            "type": "status", "state": st.state if self._up else NO_LINK,
             "wpos": [v * k for v in st.wpos], "mpos": [v * k for v in st.mpos],
             "feed": st.feed * k, "spindle": st.spindle,
             "ov": [st.feed_ov, st.rapid_ov, st.spindle_ov],
@@ -186,6 +198,9 @@ class WebServer:
 
     def apply(self, cmd):
         c = cmd.get("cmd")
+        if not self._up and (c in _WRITES or c in ("ctl_settings", "ctl_set")):
+            self._refuse(c, cmd)
+            return
         if c == "rt":
             a = cmd.get("action")
             if a == "stop":
@@ -262,6 +277,53 @@ class WebServer:
             if not self.s.active and not self._jog_blocks():
                 self.s.write_line("$save", lambda r: self.broadcast(
                     {"type": "ctl_saved", "reply": r}))
+
+    def _refuse(self, c, cmd):
+        """A command that needs the controller, while the link is down."""
+        if c == "ctl_settings":
+            self.broadcast({"type": "ctl_settings", "fw": "", "error": LINK_LOST})
+        elif c == "ctl_set":
+            self.broadcast({"type": "ctl_set", "key": str(cmd.get("key") or ""),
+                            "value": str(cmd.get("value") or ""), "reply": LINK_LOST})
+        elif c not in ("jog_vel", "jog_follow", "jog_end"):   # (many a second)
+            self.broadcast({"type": "msg", "line": "not sent: serial link down"})
+
+    def _setup(self):
+        """Reports in mm: gcgo converts units itself. Its reply is not shown
+        (caPy has no $13 and answers error:3)."""
+        self.s.write_line(REPORT_MM, _quiet)
+
+    def _link_ok(self):
+        """Watch the serial link. When it drops: end the job, the jog and
+        anything waiting for a reply, then try the port every LINK_RETRY_MS.
+        Once it is back, send the setup lines after LINK_SETUP_MS. True while
+        the link is up."""
+        if self.s.connected:
+            if self._setup_at is not None and diff_ms(now_ms(), self._setup_at) >= 0:
+                self._setup_at = None
+                self._setup()
+            return True
+        if self._up:
+            self._up = False
+            self._setup_at = None
+            self.s.check_link()             # ends the stream, answers owed lines
+            self.follow.active = False
+            self._ctl = None
+            if self._job:
+                self._job = False
+                self.broadcast({"type": "msg", "line": "serial link lost — job stopped "
+                                "after %d lines; reconnecting" % self.s.sent})
+            else:
+                self.broadcast({"type": "msg", "line": "serial link lost — reconnecting"})
+            self._retry_at = now_ms()
+        if diff_ms(now_ms(), self._retry_at) >= 0:
+            self._retry_at = now_ms() + LINK_RETRY_MS
+            if self.s.reconnect():
+                self._up = True
+                self._setup_at = now_ms() + LINK_SETUP_MS
+                self.broadcast({"type": "msg", "line": "serial link back"})
+                return True
+        return False
 
     def _jog_vel(self, cmd):
         """A virtual-stick frame: x/y/z deflection -1..1 and the jog feed
@@ -432,44 +494,15 @@ class WebServer:
     # --- the single driver task ---
 
     async def driver(self):
-        poll_at = 0
         bcast_at = 0
         while True:
-            if self.s.active:
-                was = self.s.state
-                self.s.pump()
-                # end of file: sending finished, but the machine keeps executing
-                # buffered motion. Announce it and let the loop keep polling.
-                if was == RUNNING and self.s.state == FINISHING:
-                    self.broadcast({"type": "msg",
-                                    "line": "end of file (%d lines) — finishing motion"
-                                            % self.s.sent})
-            elif self._job:
-                # The job ended — in pump() (done/error) or from a client's stop,
-                # which lands between passes. Anything but a clean finish leaves
-                # buffered motion running, so halt the machine and flush it.
-                self._job = False
-                st = self.s.state
-                if st != "done" and self.s.sent_any:
-                    self.s.request_cancel()
-                elif st == "done" and self.cfg.after == "clear":
-                    self.loaded = None
-                self.broadcast({"type": "msg",
-                                "line": "stream %s (%d lines)" % (st, self.s.sent)})
-            else:
-                self.s.service()
-                for inp in self.inputs:
-                    inp.poll(self.jog)
-                self.jog.tick()
-                self._jog_idle_end()
-                # poll interval tracks cfg.rate so a settings change takes effect
-                # live; faster while jogging so the DRO follows the stick
-                poll_ms = int((self.cfg.rate or 1.0) * 1000)
-                if self.jog.active:
-                    poll_ms = min(poll_ms, 200)
-                if diff_ms(now_ms(), poll_at) >= 0:
-                    self.s.request_status()
-                    poll_at = now_ms() + poll_ms
+            try:
+                if self._link_ok():
+                    self._drive()
+            except Exception as e:      # the one task that talks to the machine
+                self.broadcast({"type": "msg", "line": "driver error: %r" % (e,)})
+                print("gcgo driver error:", repr(e))
+                await asyncio.sleep(1)
             if diff_ms(now_ms(), bcast_at) >= 0:
                 self.broadcast(self.status_obj())
                 bcast_at = now_ms() + 200
@@ -478,6 +511,44 @@ class WebServer:
             else:
                 self.pending = []
             await asyncio.sleep(0.005)
+
+    def _drive(self):
+        """One pass with the link up: pump a job, or serve the jog and MDI."""
+        if self.s.active:
+            was = self.s.state
+            self.s.pump()
+            # end of file: sending finished, but the machine keeps executing
+            # buffered motion. Announce it and let the loop keep polling.
+            if was == RUNNING and self.s.state == FINISHING:
+                self.broadcast({"type": "msg",
+                                "line": "end of file (%d lines) — finishing motion"
+                                        % self.s.sent})
+        elif self._job:
+            # The job ended — in pump() (done/error) or from a client's stop,
+            # which lands between passes. Anything but a clean finish leaves
+            # buffered motion running, so halt the machine and flush it.
+            self._job = False
+            st = self.s.state
+            if st != "done" and self.s.sent_any:
+                self.s.request_cancel()
+            elif st == "done" and self.cfg.after == "clear":
+                self.loaded = None
+            self.broadcast({"type": "msg",
+                            "line": "stream %s (%d lines)" % (st, self.s.sent)})
+        else:
+            self.s.service()
+            for inp in self.inputs:
+                inp.poll(self.jog)
+            self.jog.tick()
+            self._jog_idle_end()
+            # poll interval tracks cfg.rate so a settings change takes effect
+            # live; faster while jogging so the DRO follows the stick
+            poll_ms = int((self.cfg.rate or 1.0) * 1000)
+            if self.jog.active:
+                poll_ms = min(poll_ms, 200)
+            if diff_ms(now_ms(), self._poll_at) >= 0:
+                self.s.request_status()
+                self._poll_at = now_ms() + poll_ms
 
     def _jog_idle_end(self):
         """Leave jog mode after JOG_IDLE_MS with no motion asked for, so the

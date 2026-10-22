@@ -3,7 +3,7 @@
 
 A board that imports .py source compiles it in RAM, and the web server's
 modules peak well above what they keep: from source the web pendant needs a
-heap of about 180 KB, from .mpy about 110 KB (measured on the unix port,
+heap of about 190 KB, from .mpy about 115 KB (measured on the unix port,
 64-bit). A Pico W with WiFi up has roughly 160-170 KB, so put .mpy on it.
 
     pip install mpy-cross==<the board's MicroPython version>
